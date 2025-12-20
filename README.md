@@ -1,0 +1,101 @@
+# Guerite
+
+Guerite watches Docker containers that carry a specific label, pulls their base images when updates appear, and restarts the containers. It talks directly to the Docker API and can reach a local or remote daemon.
+
+## Requirements
+
+- Docker API access (local socket or remote TCP/TLS endpoint)
+- Python 3.9+ if running from source; otherwise build the container image
+- Optional: Pushover token/user for notifications
+
+## Build the image
+
+Build from the included Dockerfile:
+
+```bash
+docker build -t guerite .
+```
+
+### Run against the local socket
+
+```bash
+docker run --rm \
+	-v /var/run/docker.sock:/var/run/docker.sock:ro \
+	-e GUERITE_LOG_LEVEL=INFO \
+	guerite:latest
+```
+
+### Run against a remote daemon (TLS)
+
+Place `ca.pem`, `cert.pem`, and `key.pem` under `./certs` and point `DOCKER_HOST` to the remote engine:
+
+```bash
+docker run --rm \
+	-e DOCKER_HOST=tcp://remote-docker-host:2376 \
+	-e DOCKER_TLS_VERIFY=1 \
+	-e DOCKER_CERT_PATH=/certs \
+	-v "$PWD"/certs:/certs:ro \
+	-e GUERITE_POLL_INTERVAL=600 \
+	guerite:latest
+```
+
+## Configuration
+
+Set environment variables to adjust behavior:
+
+- `DOCKER_HOST` (default `unix://var/run/docker.sock`): Docker endpoint to use.
+- `GUERITE_MONITOR_LABEL` (default `guerite.monitor`): Label key that marks containers to watch.
+- `GUERITE_MONITOR_VALUE` (default `true`): Label value that enables monitoring.
+- `GUERITE_CRON_LABEL` (default `guerite.cron`): Label key containing cron expressions for per-container schedules.
+- `GUERITE_POLL_INTERVAL` (default `600`): Seconds between polling cycles.
+- `GUERITE_DRY_RUN` (default `false`): If `true`, log actions without restarting containers.
+- `GUERITE_LOG_LEVEL` (default `INFO`): Log level (e.g., `DEBUG`, `INFO`).
+- `GUERITE_PUSHOVER_TOKEN` / `GUERITE_PUSHOVER_USER`: Enable notifications when both are set.
+- `GUERITE_PUSHOVER_API` (default `https://api.pushover.net/1/messages.json`): Pushover endpoint override.
+
+## Container labels
+
+Add labels to any container you want Guerite to manage:
+
+- `guerite.monitor=true` marks the container for monitoring.
+- Optional `guerite.cron=*/10 * * * *` schedules checks using cron syntax. Without it, the container is checked on every poll.
+
+## Quick start (local Docker socket)
+
+Use the provided compose file to build and run Guerite against the local daemon:
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+This starts Guerite and a sample `nginx` container labeled for monitoring. The daemon socket is mounted read-only.
+
+## Remote daemon over TCP/TLS
+
+Guerite can talk to a remote Docker host via the standard TLS variables. Prepare TLS client certs from the remote daemon and place them under `./certs` (ca.pem, cert.pem, key.pem). Then run:
+
+```bash
+docker compose -f docker-compose.remote.yml up -d --build
+```
+
+The compose file sets `DOCKER_HOST=tcp://remote-docker-host:2376`, enables TLS verification, and mounts the certs. Adjust the host name and poll interval to your environment.
+
+### Using an SSH tunnel instead of exposing TCP
+
+If you prefer an SSH tunnel, forward the remote socket locally and point `DOCKER_HOST` at the local port:
+
+```bash
+ssh -N -L 2376:/var/run/docker.sock user@remote-host
+DOCKER_HOST=tcp://localhost:2376 DOCKER_TLS_VERIFY=0 docker compose -f docker-compose.remote.yml up -d --build
+```
+
+## Running from source
+
+You can run Guerite without containers:
+
+```bash
+pip install -e .
+python -m guerite
+```
+
+Ensure `DOCKER_HOST` and optional Pushover variables are set in the environment.

@@ -1,0 +1,17 @@
+[project]
+name = "guerite"
+version = "0.1.0"
+description = "Minimal Docker container watcher and restarter"
+authors = [{ name = "Guerite" }]
+requires-python = ">=3.9"
+dependencies = [
+    "docker>=7.0.0",
+    "croniter>=2.0.0",
+]
+
+[project.scripts]
+guerite = "guerite.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
