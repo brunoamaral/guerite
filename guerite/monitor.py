@@ -168,9 +168,17 @@ def next_wakeup(containers: list[Container], settings: Settings, reference: date
             continue
 
         try:
-            next_time = croniter(cron_expression, reference, ret_type=datetime).get_next(datetime)
+            iterator = croniter(cron_expression, reference, ret_type=datetime)
+            next_time = iterator.get_next(datetime)
             candidates.append(next_time)
-            LOG.debug("%s next due %s via cron %s", container.name, next_time.isoformat(), cron_expression)
+            upcoming = _upcoming_runs(iterator, count=2)
+            LOG.debug(
+                "%s cron %s next %s then %s",
+                container.name,
+                cron_expression,
+                next_time.isoformat(),
+                [ts.isoformat() for ts in upcoming],
+            )
         except (ValueError, KeyError) as error:
             LOG.warning("Invalid cron expression on %s: %s", container.name, error)
 
@@ -178,3 +186,13 @@ def next_wakeup(containers: list[Container], settings: Settings, reference: date
         return reference + timedelta(seconds=300)
 
     return min(candidates)
+
+
+def _upcoming_runs(iterator: croniter, count: int) -> list[datetime]:
+    runs: list[datetime] = []
+    for _ in range(count):
+        try:
+            runs.append(iterator.get_next(datetime))
+        except (StopIteration, ValueError):
+            break
+    return runs

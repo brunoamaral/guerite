@@ -5,7 +5,6 @@ services:
     build: .
     image: guerite:latest
     environment:
-      GUERITE_POLL_INTERVAL: 300
       GUERITE_LOG_LEVEL: INFO
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -14,6 +13,5 @@ services:
   demo-app:
     image: nginx:alpine
     labels:
-      guerite.monitor: "true"
       guerite.cron: "*/10 * * * *"
     restart: unless-stopped

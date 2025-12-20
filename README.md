@@ -35,7 +35,6 @@ docker run --rm \
 	-e DOCKER_TLS_VERIFY=1 \
 	-e DOCKER_CERT_PATH=/certs \
 	-v "$PWD"/certs:/certs:ro \
-	-e GUERITE_POLL_INTERVAL=600 \
 	guerite:latest
 ```
 

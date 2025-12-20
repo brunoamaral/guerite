@@ -8,7 +8,6 @@ services:
       DOCKER_HOST: "tcp://remote-docker-host:2376"
       DOCKER_TLS_VERIFY: "1"
       DOCKER_CERT_PATH: "/certs"
-      GUERITE_POLL_INTERVAL: 600
       GUERITE_LOG_LEVEL: INFO
     volumes:
       - ./certs:/certs:ro
