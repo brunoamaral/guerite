@@ -22,6 +22,21 @@ def build_client(settings: Settings) -> DockerClient:
 def is_monitored_event(event: dict, settings: Settings) -> bool:
     if event.get("Type") != "container":
         return False
+    action = event.get("Action")
+    if action not in {
+        "create",
+        "start",
+        "restart",
+        "stop",
+        "kill",
+        "die",
+        "destroy",
+        "update",
+        "rename",
+        "pause",
+        "unpause",
+    }:
+        return False
     attributes = event.get("Actor", {}).get("Attributes", {})
     for label in (settings.update_label, settings.restart_label, settings.health_label):
         if label in attributes:
