@@ -13,5 +13,6 @@ services:
   demo-app:
     image: nginx:alpine
     labels:
-      guerite.cron: "*/10 * * * *"
+      guerite.update: "*/10 * * * *"
+      guerite.health_check: "*/5 * * * *"
     restart: unless-stopped

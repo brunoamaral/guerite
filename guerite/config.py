@@ -2,7 +2,10 @@ from dataclasses import dataclass
 from os import getenv
 from typing import Optional
 
-DEFAULT_CRON_LABEL = "guerite.cron"
+DEFAULT_UPDATE_LABEL = "guerite.update"
+DEFAULT_RESTART_LABEL = "guerite.restart"
+DEFAULT_HEALTH_LABEL = "guerite.health_check"
+DEFAULT_HEALTH_BACKOFF_SECONDS = 300
 DEFAULT_DOCKER_HOST = "unix://var/run/docker.sock"
 DEFAULT_PUSHOOVER_API = "https://api.pushover.net/1/messages.json"
 DEFAULT_LOG_LEVEL = "INFO"
@@ -12,7 +15,10 @@ DEFAULT_TZ = "UTC"
 @dataclass(frozen=True)
 class Settings:
     docker_host: str
-    cron_label: str
+    update_label: str
+    restart_label: str
+    health_label: str
+    health_backoff_seconds: int
     timezone: str
     pushover_token: Optional[str]
     pushover_user: Optional[str]
@@ -24,7 +30,13 @@ class Settings:
 def load_settings() -> Settings:
     return Settings(
         docker_host=getenv("DOCKER_HOST", DEFAULT_DOCKER_HOST),
-        cron_label=getenv("GUERITE_CRON_LABEL", DEFAULT_CRON_LABEL),
+        update_label=getenv("GUERITE_UPDATE_LABEL", DEFAULT_UPDATE_LABEL),
+        restart_label=getenv("GUERITE_RESTART_LABEL", DEFAULT_RESTART_LABEL),
+        health_label=getenv("GUERITE_HEALTH_CHECK_LABEL", DEFAULT_HEALTH_LABEL),
+        health_backoff_seconds=_env_int(
+            "GUERITE_HEALTH_CHECK_BACKOFF_SECONDS",
+            DEFAULT_HEALTH_BACKOFF_SECONDS,
+        ),
         timezone=getenv("GUERITE_TZ", DEFAULT_TZ),
         pushover_token=getenv("GUERITE_PUSHOVER_TOKEN"),
         pushover_user=getenv("GUERITE_PUSHOVER_USER"),
