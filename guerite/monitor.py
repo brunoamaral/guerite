@@ -1,6 +1,7 @@
 from datetime import datetime
 from datetime import timedelta
 from logging import getLogger
+from socket import gethostname
 from typing import Optional
 
 from croniter import croniter
@@ -99,7 +100,20 @@ def _should_notify(settings: Settings, event: str) -> bool:
     return event in settings.notifications
 
 
-def restart_container(client: DockerClient, container: Container, image_ref: str) -> bool:
+def _short_id(identifier: Optional[str]) -> str:
+    if identifier is None:
+        return "unknown"
+    return identifier.split(":")[-1][:12]
+
+
+def restart_container(
+    client: DockerClient,
+    container: Container,
+    image_ref: str,
+    new_image_id: Optional[str],
+    event_log: list[str],
+    notify: bool,
+) -> bool:
     config = container.attrs.get("Config", {})
     host_config = container.attrs.get("HostConfig")
     networking = container.attrs.get("NetworkSettings", {}).get("Networks")
@@ -140,6 +154,8 @@ def restart_container(client: DockerClient, container: Container, image_ref: str
 
     try:
         LOG.info("Stopping %s", name)
+        if notify:
+            event_log.append(f"Stopping container {name} ({_short_id(container.image.id)})")
         container.stop()
         container.remove()
         created = client.api.create_container(**create_kwargs)
@@ -158,6 +174,8 @@ def restart_container(client: DockerClient, container: Container, image_ref: str
                 )
         if new_id is not None:
             client.api.start(new_id)
+            if notify:
+                event_log.append(f"Creating container {name} ({_short_id(new_image_id)})")
         LOG.info("Restarted %s", name)
         return True
     except (APIError, DockerException) as error:
@@ -165,12 +183,20 @@ def restart_container(client: DockerClient, container: Container, image_ref: str
         return False
 
 
-def remove_old_image(client: DockerClient, old_image_id: Optional[str], new_image_id: str) -> None:
+def remove_old_image(
+    client: DockerClient,
+    old_image_id: Optional[str],
+    new_image_id: str,
+    event_log: list[str],
+    notify: bool,
+) -> None:
     if old_image_id is None or old_image_id == new_image_id:
         return
     try:
         client.images.remove(image=old_image_id)
         LOG.info("Removed old image %s", old_image_id)
+        if notify:
+            event_log.append(f"Removing image ({_short_id(old_image_id)})")
     except APIError as error:
         LOG.debug("Could not remove old image %s: %s", old_image_id, error)
     except DockerException as error:
@@ -185,6 +211,8 @@ def run_once(
 ) -> None:
     current_time = timestamp or now_utc()
     monitored = containers if containers is not None else select_monitored_containers(client, settings)
+    event_log: list[str] = []
+    hostname = gethostname()
     for container in monitored:
         update_due = _cron_matches(container, settings.update_label, current_time)
         restart_due = _cron_matches(container, settings.restart_label, current_time)
@@ -201,6 +229,7 @@ def run_once(
             continue
 
         if update_due:
+            notify_update = _should_notify(settings, "update")
             old_image_id = current_image_id(container)
             pulled_image = pull_image(client, image_ref)
             if pulled_image is None:
@@ -209,13 +238,28 @@ def run_once(
                 LOG.debug("%s is up-to-date", container.name)
                 continue
             LOG.info("Updating %s with image %s", container.name, image_ref)
+            if notify_update:
+                event_log.append(
+                    f"Found new {image_ref} image ({_short_id(pulled_image.id)})"
+                )
             if settings.dry_run:
                 LOG.info("Dry-run enabled; not restarting %s", container.name)
                 continue
-            if restart_container(client, container, image_ref):
-                remove_old_image(client, old_image_id, pulled_image.id)
-                if _should_notify(settings, "update"):
-                    notify_pushover(settings, "Guerite", f"Updated {container.name} with {image_ref}")
+            if restart_container(
+                client,
+                container,
+                image_ref,
+                pulled_image.id,
+                event_log,
+                notify_update,
+            ):
+                remove_old_image(
+                    client,
+                    old_image_id,
+                    pulled_image.id,
+                    event_log,
+                    notify_update,
+                )
             continue
 
         if unhealthy_now and not _health_allowed(container.id, current_time, settings):
@@ -226,13 +270,32 @@ def run_once(
         if settings.dry_run:
             LOG.info("Dry-run enabled; not restarting %s", container.name)
             continue
-        if restart_container(client, container, image_ref):
+        if unhealthy_now:
+            notify_event = _should_notify(settings, "health") or _should_notify(settings, "health_check")
+        else:
+            notify_event = _should_notify(settings, "restart")
+        new_image_id = current_image_id(container)
+        if restart_container(
+            client,
+            container,
+            image_ref,
+            new_image_id,
+            event_log,
+            notify_event,
+        ):
             if unhealthy_now:
                 _HEALTH_BACKOFF[container.id] = current_time + timedelta(seconds=settings.health_backoff_seconds)
                 if _should_notify(settings, "health") or _should_notify(settings, "health_check"):
-                    notify_pushover(settings, "Guerite", f"Restarted {container.name} after failed health check")
+                    event_log.append(
+                        f"Restarted {container.name} after failed health check ({_short_id(new_image_id)})"
+                    )
             elif restart_due and _should_notify(settings, "restart"):
-                notify_pushover(settings, "Guerite", f"Restarted {container.name} (scheduled restart)")
+                event_log.append(
+                    f"Restarted {container.name} (scheduled restart) ({_short_id(new_image_id)})"
+                )
+
+    if event_log:
+        notify_pushover(settings, f"Guerite on {hostname}", "\n".join(event_log))
 
 
 def next_wakeup(containers: list[Container], settings: Settings, reference: datetime) -> datetime:
