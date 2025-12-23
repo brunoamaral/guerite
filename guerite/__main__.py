@@ -1,4 +1,5 @@
 from logging import getLogger
+from math import ceil
 from threading import Event, Thread
 from time import sleep
 
@@ -75,7 +76,8 @@ def main() -> None:
         containers = select_monitored_containers(client, settings)
         run_once(client, settings, timestamp=timestamp, containers=containers)
         next_run_at = next_wakeup(containers, settings, reference=timestamp)
-        sleep_seconds = max(1, int((next_run_at - now_tz(settings.timezone)).total_seconds()))
+        delta_seconds = (next_run_at - now_tz(settings.timezone)).total_seconds()
+        sleep_seconds = max(1, int(ceil(delta_seconds)))
         LOG.info("Next check at %s (in %ss)", next_run_at.isoformat(), sleep_seconds)
         woke = wake_signal.wait(timeout=sleep_seconds)
         if woke:
