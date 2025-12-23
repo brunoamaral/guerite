@@ -703,7 +703,7 @@ def run_once(
         update_due = _cron_matches(container, settings.update_label, current_time)
         restart_due = _cron_matches(container, settings.restart_label, current_time)
         health_due = _cron_matches(container, settings.health_label, current_time)
-        if (update_due or restart_due or health_due) and _is_swarm_managed(container):
+        if (update_due or health_due) and _is_swarm_managed(container):
             LOG.warning("Skipping %s; swarm-managed containers may lose secrets/configs if recreated", container.name)
             if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
                 event_log.append(f"Skipping swarm-managed container {container.name}; secrets/configs not safely restorable")
@@ -769,45 +769,57 @@ def run_once(
         if health_due and recently_started:
             LOG.debug("Skipping %s; healthcheck still in grace window", container.name)
             continue
-        if not _restart_allowed(container.id, current_time, settings):
-            if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
-                backoff_until = _RESTART_BACKOFF.get(container.id)
-                if backoff_until is not None:
-                    _notify_restart_backoff(container.name, container.id, backoff_until, event_log, settings)
+        if restart_due and not unhealthy_now:
+            LOG.info("Restarting %s (scheduled restart)", container.name)
+            if settings.dry_run:
+                LOG.info("Dry-run enabled; not restarting %s", container.name)
+                continue
+            notify_restart = _should_notify(settings, "restart")
+            image_id = current_image_id(container)
+            try:
+                container.restart()
+                if notify_restart:
+                    event_log.append(
+                        f"Restarted {container.name} (scheduled restart) ({_short_id(image_id)})"
+                    )
+            except DockerException as error:
+                LOG.error("Failed to restart %s: %s", container.name, error)
+                if notify_restart:
+                    event_log.append(f"Failed to restart {container.name}: {error}")
+                _register_restart_failure(container.id, container.name, notify_restart, event_log, settings, error)
             continue
 
-        reason = "scheduled restart" if restart_due else "unhealthy" if unhealthy_now else "restart"
-        LOG.info("Restarting %s due to %s", container.name, reason)
-        if settings.dry_run:
-            LOG.info("Dry-run enabled; not restarting %s", container.name)
-            continue
         if unhealthy_now:
+            if not _restart_allowed(container.id, current_time, settings):
+                if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
+                    backoff_until = _RESTART_BACKOFF.get(container.id)
+                    if backoff_until is not None:
+                        _notify_restart_backoff(container.name, container.id, backoff_until, event_log, settings)
+                continue
+
+            LOG.info("Restarting %s due to unhealthy", container.name)
+            if settings.dry_run:
+                LOG.info("Dry-run enabled; not restarting %s", container.name)
+                continue
             notify_event = _should_notify(settings, "health") or _should_notify(settings, "health_check")
-        else:
-            notify_event = _should_notify(settings, "restart")
-        new_image_id = current_image_id(container)
-        if restart_container(
-            client,
-            container,
-            image_ref,
-            new_image_id,
-            settings,
-            event_log,
-            notify_event,
-        ):
-            if unhealthy_now:
+            new_image_id = current_image_id(container)
+            if restart_container(
+                client,
+                container,
+                image_ref,
+                new_image_id,
+                settings,
+                event_log,
+                notify_event,
+            ):
                 _HEALTH_BACKOFF[container.id] = current_time + timedelta(seconds=settings.health_backoff_seconds)
                 _save_health_backoff(settings.state_file)
                 if _should_notify(settings, "health") or _should_notify(settings, "health_check"):
                     event_log.append(
                         f"Restarted {container.name} after failed health check ({_short_id(new_image_id)})"
                     )
-            elif restart_due and _should_notify(settings, "restart"):
-                event_log.append(
-                    f"Restarted {container.name} (scheduled restart) ({_short_id(new_image_id)})"
-                )
-        elif notify_event:
-            event_log.append(f"Failed to restart {container.name}")
+            elif notify_event:
+                event_log.append(f"Failed to restart {container.name}")
 
     if prune_due:
         notify_prune = _should_notify(settings, "prune")
