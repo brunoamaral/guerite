@@ -16,6 +16,20 @@ from .utils import configure_logging, now_tz
 LOG = getLogger(__name__)
 
 
+def _format_human_local(dt, reference):
+    if dt.tzinfo is not None and reference.tzinfo is not None:
+        dt = dt.astimezone(reference.tzinfo)
+    reference_date = reference.date()
+    date_part = dt.date()
+    if date_part == reference_date:
+        prefix = "today"
+    elif date_part == reference_date + timedelta(days=1):
+        prefix = "tomorrow"
+    else:
+        prefix = date_part.isoformat()
+    return f"{prefix} {dt.strftime('%H:%M')}"
+
+
 def build_client(settings: Settings) -> DockerClient:
     try:
         return DockerClient(base_url=settings.docker_host)
@@ -104,17 +118,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-def _format_human_local(dt, reference):
-    if dt.tzinfo is not None and reference.tzinfo is not None:
-        dt = dt.astimezone(reference.tzinfo)
-    reference_date = reference.date()
-    date_part = dt.date()
-    if date_part == reference_date:
-        prefix = "today"
-    elif date_part == reference_date + timedelta(days=1):
-        prefix = "tomorrow"
-    else:
-        prefix = date_part.isoformat()
-    return f"{prefix} {dt.strftime('%H:%M')}"

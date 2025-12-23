@@ -328,8 +328,10 @@ def restart_container(
     _preflight_mounts(name, mounts, notify, event_log)
 
     new_id: Optional[str] = None
+    old_renamed = False
     try:
         client.api.rename(container.id, temp_old_name)
+        old_renamed = True
         created = client.api.create_container(**create_kwargs)
         new_id = created.get("Id")
         LOG.info("Stopping %s", original_name)
@@ -356,7 +358,8 @@ def restart_container(
                             mac_address=mac_address,
                         )
                     except APIError as error:
-                        LOG.debug("MAC attach skipped for %s on %s: %s", original_name, network_name, error)
+                        LOG.error("Failed to attach %s to %s with MAC: %s", original_name, network_name, error)
+                        raise
         client.api.rename(new_id, original_name)
         client.api.start(new_id)
         LOG.info("Restarted %s", original_name)
@@ -367,13 +370,14 @@ def restart_container(
         except DockerException:
             LOG.debug("Could not remove old container %s", temp_old_name)
         return True
-    except (APIError, DockerException) as error:
-        LOG.error("Failed to restart %s: %s", original_name, error)
+    except (APIError, DockerException, TypeError) as error:
+        LOG.error("Failed to restart %s during recreate: %s", original_name, error)
         try:
-            client.api.rename(container.id, original_name)
+            if old_renamed:
+                client.api.rename(container.id, original_name)
             container.start()
-        except DockerException:
-            LOG.warning("Rollback failed for %s", original_name)
+        except DockerException as rollback_error:
+            LOG.warning("Rollback failed for %s: %s", original_name, rollback_error)
         if new_id is not None:
             try:
                 client.api.remove_container(new_id, force=True)
