@@ -173,9 +173,20 @@ def _should_notify(settings: Settings, event: str) -> bool:
     return event in settings.notifications
 
 
+def _clean_cron_expression(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1].strip()
+    if (cleaned.startswith("\"") and cleaned.endswith("\"")) or (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned or None
+
+
 def _prune_due(settings: Settings, timestamp: datetime) -> bool:
     global _PRUNE_CRON_INVALID
-    cron_expression = settings.prune_cron
+    cron_expression = _clean_cron_expression(settings.prune_cron)
     if not cron_expression:
         return False
     if _PRUNE_CRON_INVALID:
@@ -190,7 +201,7 @@ def _prune_due(settings: Settings, timestamp: datetime) -> bool:
 
 def next_prune_time(settings: Settings, reference: datetime) -> Optional[datetime]:
     global _PRUNE_CRON_INVALID
-    cron_expression = settings.prune_cron
+    cron_expression = _clean_cron_expression(settings.prune_cron)
     if not cron_expression or _PRUNE_CRON_INVALID:
         return None
     try:
@@ -271,9 +282,6 @@ def restart_container(
                     raise
 
     create_kwargs = {
-        "attach_stderr": config.get("AttachStderr"),
-        "attach_stdin": config.get("AttachStdin"),
-        "attach_stdout": config.get("AttachStdout"),
         "command": config.get("Cmd"),
         "domainname": config.get("Domainname"),
         "entrypoint": config.get("Entrypoint"),
@@ -290,7 +298,6 @@ def restart_container(
         "runtime": host_config.get("Runtime") if isinstance(host_config, dict) else None,
         "shell": config.get("Shell"),
         "stdin_open": config.get("OpenStdin"),
-        "stdin_once": config.get("StdinOnce"),
         "stop_signal": config.get("StopSignal"),
         "stop_timeout": config.get("StopTimeout"),
         "tty": config.get("Tty"),
