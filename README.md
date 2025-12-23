@@ -1,5 +1,7 @@
 # Guerite
 
+![Keeping guard over your containers](docs/guerite.png)
+
 > _A guerite is a small, enclosed structure used for temporary or makeshift purposes, while a [watchtower](https://github.com/containrrr/watchtower) is a tall, elevated structure used for permanent or sturdy purposes._
 
 Guerite is a [watchtower](https://github.com/containrrr/watchtower) alternative that watches Docker containers that carry a specific label, pulls their base images when updates appear, and restarts the containers, as well as being able to regularly prune stale images.
@@ -76,6 +78,7 @@ Add labels to any container you want Guerite to manage (any label opts the conta
 - `guerite.health_check=*/5 * * * *` runs a health check on the cron schedule; if the container is not `healthy`, it is restarted (rate-limited by the backoff).
 
 Notifications:
+
 - Update: sent when an image is pulled and the container is restarted (if `GUERITE_NOTIFICATIONS` includes `update`).
 - Restart: sent on cron-driven restarts when `GUERITE_NOTIFICATIONS` includes `restart`; failures to restart are also reported when restart notifications are enabled.
 - Health: sent on health-check-driven restarts when `GUERITE_NOTIFICATIONS` includes `health`/`health_check`; failures are reported when enabled.
@@ -83,6 +86,7 @@ Notifications:
 - Prune: sent when periodic image pruning runs or fails (if `GUERITE_NOTIFICATIONS` includes `prune`).
 
 Image pruning:
+
 - Optional cron-driven prune removes unused images (not just dangling) via the Docker API.
 - Prune is skipped if `GUERITE_PRUNE_CRON` is unset.
 - Prune is deferred while rollback containers/images exist; stale rollback containers are auto-removed after the grace window so pruning can resume.

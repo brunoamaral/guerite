@@ -1,5 +1,7 @@
 # Guerite
 
+![Keeping watch over your containers](guerite.png)
+
 Guerite is a small Docker container management tool written in Python that watches for changes to the images of running containers with a specific label and pulls and restarts those containers when their base images are updated.
 
 It is inspired by Watchtower but, like a Guerite (a small fortification), it aims to be minimalistic and focused on a specific task without unnecessary complexity.
