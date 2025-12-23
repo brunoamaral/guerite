@@ -14,6 +14,7 @@ DEFAULT_TZ = "UTC"
 DEFAULT_STATE_FILE = "/tmp/guerite_state.json"
 DEFAULT_PRUNE_CRON: str | None = None
 DEFAULT_WEBHOOK_URL: str | None = None
+DEFAULT_ROLLBACK_GRACE_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class Settings:
     log_level: str
     state_file: str
     prune_cron: Optional[str]
+    rollback_grace_seconds: int
 
 
 def load_settings() -> Settings:
@@ -55,6 +57,10 @@ def load_settings() -> Settings:
         log_level=getenv("GUERITE_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
         state_file=getenv("GUERITE_STATE_FILE", DEFAULT_STATE_FILE),
         prune_cron=_env_str("GUERITE_PRUNE_CRON", DEFAULT_PRUNE_CRON),
+        rollback_grace_seconds=_env_int(
+            "GUERITE_ROLLBACK_GRACE_SECONDS",
+            DEFAULT_ROLLBACK_GRACE_SECONDS,
+        ),
     )
 
 

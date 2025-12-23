@@ -58,6 +58,7 @@ Set environment variables to adjust behavior:
 - `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` (default `300`): Minimum seconds between health-based restarts per container.
 - `GUERITE_PRUNE_CRON` (default unset): Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped.
 - `GUERITE_NOTIFICATIONS` (default `update`): Comma-delimited list of events to notify via Pushover/webhook; accepted values: `update`, `restart`, `health`/`health_check`, `startup`, `detect`, `prune`.
+- `GUERITE_ROLLBACK_GRACE_SECONDS` (default `3600`): Keep temporary rollback containers/images for at least this many seconds before allowing prune to clean them up.
 - `GUERITE_TZ` (default `UTC`): Time zone used to evaluate cron expressions.
 - `GUERITE_STATE_FILE` (default `/tmp/guerite_state.json`): Path to persist health backoff state across restarts; file must be writable.
 - `GUERITE_DRY_RUN` (default `false`): If `true`, log actions without restarting containers.
@@ -84,6 +85,7 @@ Notifications:
 Image pruning:
 - Optional cron-driven prune removes unused images (not just dangling) via the Docker API.
 - Prune is skipped if `GUERITE_PRUNE_CRON` is unset.
+- Prune is deferred while rollback containers/images exist; stale rollback containers are auto-removed after the grace window so pruning can resume.
 - On prune failure, a warning is logged and a notification is sent if enabled.
 
 ## Quick start (local Docker socket)

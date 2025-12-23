@@ -8,6 +8,7 @@ from logging import getLogger
 from os.path import exists
 from socket import gethostname
 from typing import Optional
+from time import sleep
 
 from croniter import croniter
 from docker import DockerClient
@@ -124,10 +125,27 @@ def _is_unhealthy(container: Container) -> bool:
     if status is None:
         return False
     lowered = status.lower()
-    if lowered == "healthy":
+    if lowered in {"healthy", "starting"}:
         return False
     LOG.debug("%s health status %s", container.name, lowered)
     return True
+
+
+def _started_recently(container: Container, now: datetime, grace_seconds: int) -> bool:
+    try:
+        started_at = container.attrs.get("State", {}).get("StartedAt")
+    except DockerException as error:
+        LOG.debug("Could not read StartedAt for %s: %s", container.name, error)
+        return False
+    if not started_at:
+        return False
+    try:
+        # Handle timestamps like 2025-01-01T00:00:00.000000000Z
+        sanitized = started_at.rstrip("Z")
+        started_dt = datetime.fromisoformat(sanitized)
+    except (ValueError, TypeError):
+        return False
+    return (now - started_dt).total_seconds() < grace_seconds
 
 
 def _has_healthcheck(container: Container) -> bool:
@@ -192,6 +210,117 @@ def _notify_restart_backoff(container_name: str, container_id: str, backoff_unti
         f"Recreate for {container_name} deferred until {backoff_until.isoformat()} after repeated failures"
     )
     _HEALTH_BACKOFF[key] = backoff_until
+
+
+def _filter_rollback_containers(containers: list[Container]) -> list[Container]:
+    rollback: list[Container] = []
+    for container in containers:
+        name = container.name or ""
+        if "-guerite-old-" in name or "-guerite-new-" in name:
+            rollback.append(container)
+    return rollback
+
+
+def _rollback_protected_images(rollback_containers: list[Container]) -> set[str]:
+    protected: set[str] = set()
+    for container in rollback_containers:
+        image_id = current_image_id(container)
+        if image_id:
+            protected.add(image_id)
+    return protected
+
+
+def _wait_for_healthy(client: DockerClient, container_id: str, timeout_seconds: int) -> tuple[bool, Optional[str]]:
+    deadline = now_utc() + timedelta(seconds=timeout_seconds)
+    last_status: Optional[str] = None
+    while now_utc() < deadline:
+        try:
+            attrs = client.api.inspect_container(container_id)
+            health = attrs.get("State", {}).get("Health", {})
+            status = health.get("Status")
+            last_status = status
+            if status is None:
+                return True, None
+            lowered = status.lower()
+            if lowered == "healthy":
+                return True, lowered
+            if lowered == "starting":
+                sleep(2)
+                continue
+        except DockerException as error:
+            LOG.debug("Health inspect failed for %s: %s", container_id, error)
+        sleep(2)
+    return False, last_status
+
+
+def _register_restart_failure(
+    container_id: str,
+    original_name: str,
+    notify: bool,
+    event_log: list[str],
+    settings: Settings,
+    error: Exception,
+) -> None:
+    fail_count = _RESTART_FAIL_COUNT.get(container_id, 0) + 1
+    _RESTART_FAIL_COUNT[container_id] = fail_count
+    backoff_seconds = min(settings.health_backoff_seconds * max(1, fail_count), 3600)
+    backoff_until = now_utc() + timedelta(seconds=backoff_seconds)
+    _RESTART_BACKOFF[container_id] = backoff_until
+    if notify:
+        event_log.append(f"Failed to restart {original_name}: {error}")
+        _notify_restart_backoff(original_name, container_id, backoff_until, event_log, settings)
+
+
+def _cleanup_stale_rollbacks(
+    client: DockerClient,
+    all_containers: list[Container],
+    rollback_containers: list[Container],
+    settings: Settings,
+    event_log: list[str],
+    notify: bool,
+) -> list[Container]:
+    if not rollback_containers:
+        return rollback_containers
+    base_names = {container.name for container in all_containers if container.name}
+    now = now_utc()
+    remaining: list[Container] = []
+    for container in rollback_containers:
+        name = container.name or "unknown"
+        try:
+            state = container.attrs.get("State", {})
+            running = bool(state.get("Running"))
+        except DockerException as error:
+            LOG.debug("Could not read state for %s: %s", name, error)
+            remaining.append(container)
+            continue
+        if running:
+            remaining.append(container)
+            continue
+        created_raw = container.attrs.get("Created")
+        created_at: Optional[datetime] = None
+        if isinstance(created_raw, str):
+            try:
+                created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            except ValueError:
+                created_at = None
+        age = (now - created_at).total_seconds() if created_at else None
+        base_name = _strip_guerite_suffix(name)
+        if base_name not in base_names:
+            LOG.info("Keeping rollback container %s; base %s not present", name, base_name)
+            remaining.append(container)
+            continue
+        if age is None or age < settings.rollback_grace_seconds:
+            remaining.append(container)
+            continue
+        try:
+            container.remove(force=True)
+            if notify:
+                event_log.append(f"Removed stale rollback container {name}")
+            LOG.info("Removed stale rollback container %s after %.0fs", name, age if age is not None else 0)
+        except DockerException as error:
+            LOG.debug("Failed to remove rollback container %s: %s", name, error)
+            remaining.append(container)
+    return remaining
 
 
 def _should_notify(settings: Settings, event: str) -> bool:
@@ -272,6 +401,7 @@ def restart_container(
     container: Container,
     image_ref: str,
     new_image_id: Optional[str],
+    settings: Settings,
     event_log: list[str],
     notify: bool,
 ) -> bool:
@@ -388,6 +518,41 @@ def restart_container(
         LOG.info("Restarted %s", original_name)
         if notify:
             event_log.append(f"Creating container {original_name} ({_short_id(new_image_id)})")
+
+        # If the new container has a healthcheck, wait for it to turn healthy before finalizing
+        if config.get("Healthcheck"):
+            healthy, status = _wait_for_healthy(client, new_id, settings.health_backoff_seconds)
+            if not healthy:
+                LOG.warning("New container %s did not become healthy (status=%s); rolling back", original_name, status)
+                try:
+                    client.api.stop(new_id)
+                except DockerException:
+                    LOG.debug("Could not stop new container %s", new_id)
+                try:
+                    client.api.rename(temp_old_name, original_name)
+                    client.api.start(container.id)
+                except DockerException as rollback_error:
+                    LOG.warning("Rollback after failed health for %s failed: %s", original_name, rollback_error)
+                    if notify:
+                        event_log.append(f"Failed health rollback for {original_name}: {rollback_error}")
+                    _register_restart_failure(container.id, original_name, notify, event_log, settings, rollback_error)
+                    return False
+                try:
+                    client.api.remove_container(new_id, force=True)
+                except DockerException:
+                    LOG.debug("Could not remove unhealthy new container %s", new_id)
+                if notify:
+                    event_log.append(f"Rolled back {original_name}; new container never became healthy")
+                _register_restart_failure(
+                    container.id,
+                    original_name,
+                    notify,
+                    event_log,
+                    settings,
+                    RuntimeError(f"new container unhealthy after recreate (status={status})"),
+                )
+                return False
+
         try:
             container.remove()
         except DockerException:
@@ -409,16 +574,7 @@ def restart_container(
                 client.api.remove_container(new_id, force=True)
             except DockerException:
                 LOG.debug("Cleanup failed for new container %s", new_id)
-        if notify:
-            event_log.append(f"Failed to restart {original_name}: {error}")
-        # Bump failure count and set backoff to avoid tight loops
-        fail_count = _RESTART_FAIL_COUNT.get(container.id, 0) + 1
-        _RESTART_FAIL_COUNT[container.id] = fail_count
-        backoff_seconds = min(settings.health_backoff_seconds * max(1, fail_count), 3600)
-        backoff_until = now_utc() + timedelta(seconds=backoff_seconds)
-        _RESTART_BACKOFF[container.id] = backoff_until
-        if notify:
-            _notify_restart_backoff(original_name, container.id, backoff_until, event_log, settings)
+        _register_restart_failure(container.id, original_name, notify, event_log, settings, error)
         return False
 
 
@@ -448,6 +604,34 @@ def prune_images(
     event_log: list[str],
     notify: bool,
 ) -> None:
+    try:
+        all_containers = client.containers.list(all=True)
+    except DockerException as error:
+        LOG.warning("Skipping prune; could not list containers: %s", error)
+        if notify:
+            event_log.append(f"Skipping prune; could not list containers: {error}")
+        return
+
+    rollback_containers = _filter_rollback_containers(all_containers)
+    rollback_containers = _cleanup_stale_rollbacks(
+        client,
+        all_containers,
+        rollback_containers,
+        settings,
+        event_log,
+        notify,
+    )
+
+    protected = _rollback_protected_images(rollback_containers)
+    if protected:
+        summary = ", ".join(sorted(_short_id(img) for img in protected))
+        LOG.info("Skipping prune; rollback images protected: %s", summary)
+        if notify:
+            event_log.append(
+                "Skipping prune while rollback containers exist; protected images: "
+                + summary
+            )
+        return
     try:
         result = client.api.prune_images(filters={"dangling": False})
         reclaimed = result.get("SpaceReclaimed") if isinstance(result, dict) else None
@@ -524,7 +708,10 @@ def run_once(
                 LOG.warning("Container %s has %s label but no healthcheck; skipping health restarts", container.name, settings.health_label)
                 _NO_HEALTH_WARNED.add(container.id)
             health_due = False
-        unhealthy_now = health_due and _is_unhealthy(container)
+        recently_started = False
+        if health_due and _has_healthcheck(container):
+            recently_started = _started_recently(container, current_time, settings.health_backoff_seconds)
+        unhealthy_now = health_due and not recently_started and _is_unhealthy(container)
 
         if not any([update_due, restart_due, unhealthy_now]):
             LOG.debug("Skipping %s; no actions scheduled now", container.name)
@@ -553,6 +740,7 @@ def run_once(
                     container,
                     image_ref,
                     pulled_image.id,
+                    settings,
                     event_log,
                     notify_update,
                 ):
@@ -572,6 +760,9 @@ def run_once(
                 continue
 
         if unhealthy_now and not _health_allowed(container.id, current_time, settings):
+            continue
+        if health_due and recently_started:
+            LOG.debug("Skipping %s; healthcheck still in grace window", container.name)
             continue
         if not _restart_allowed(container.id, current_time, settings):
             if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
@@ -595,6 +786,7 @@ def run_once(
             container,
             image_ref,
             new_image_id,
+            settings,
             event_log,
             notify_event,
         ):

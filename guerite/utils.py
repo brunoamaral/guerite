@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from logging import basicConfig, getLogger
-from typing import Optional
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -22,10 +21,3 @@ def now_tz(tz_name: str) -> datetime:
     except Exception as error:
         LOG.warning("Falling back to UTC; invalid timezone %s: %s", tz_name, error)
         return datetime.now(timezone.utc)
-
-
-def safe_get(mapping: dict, key: str, default: Optional[str] = None) -> Optional[str]:
-    if mapping is None:
-        return default
-    value = mapping.get(key)
-    return value if value is not None else default
