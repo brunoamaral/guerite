@@ -167,6 +167,7 @@ def restart_container(
                     ipv4_address=ipam_cfg.get("IPv4Address"),
                     ipv6_address=ipam_cfg.get("IPv6Address"),
                     link_local_ips=ipam_cfg.get("LinkLocalIPs"),
+                    driver_opts=network_cfg.get("DriverOpts"),
                 )
         if new_id is not None:
             client.api.start(new_id)
@@ -224,39 +225,39 @@ def run_once(
             LOG.warning("Skipping %s; missing image reference", container.name)
             continue
 
+        update_executed = False
         if update_due:
             notify_update = _should_notify(settings, "update")
             old_image_id = current_image_id(container)
             pulled_image = pull_image(client, image_ref)
-            if pulled_image is None:
-                continue
-            if not needs_update(container, pulled_image):
-                LOG.debug("%s is up-to-date", container.name)
-                continue
-            LOG.info("Updating %s with image %s", container.name, image_ref)
-            if notify_update:
-                event_log.append(
-                    f"Found new {image_ref} image ({_short_id(pulled_image.id)})"
-                )
-            if settings.dry_run:
-                LOG.info("Dry-run enabled; not restarting %s", container.name)
-                continue
-            if restart_container(
-                client,
-                container,
-                image_ref,
-                pulled_image.id,
-                event_log,
-                notify_update,
-            ):
-                remove_old_image(
+            if pulled_image is not None and needs_update(container, pulled_image):
+                LOG.info("Updating %s with image %s", container.name, image_ref)
+                if notify_update:
+                    event_log.append(
+                        f"Found new {image_ref} image ({_short_id(pulled_image.id)})"
+                    )
+                if settings.dry_run:
+                    LOG.info("Dry-run enabled; not restarting %s", container.name)
+                elif restart_container(
                     client,
-                    old_image_id,
+                    container,
+                    image_ref,
                     pulled_image.id,
                     event_log,
                     notify_update,
-                )
-            continue
+                ):
+                    remove_old_image(
+                        client,
+                        old_image_id,
+                        pulled_image.id,
+                        event_log,
+                        notify_update,
+                    )
+                    update_executed = True
+            elif pulled_image is not None:
+                LOG.debug("%s is up-to-date", container.name)
+            if update_executed:
+                continue
 
         if unhealthy_now and not _health_allowed(container.id, current_time, settings):
             continue
@@ -334,12 +335,14 @@ def _upcoming_runs(iterator: croniter, count: int) -> list[datetime]:
     return runs
 
 
-def _format_human(dt: datetime) -> str:
-    today = reference = now_utc().date()
+def _format_human(dt: datetime, reference: datetime) -> str:
+    reference_date = reference.date()
+    if dt.tzinfo is not None and reference.tzinfo is not None:
+        dt = dt.astimezone(reference.tzinfo)
     date_part = dt.date()
-    if date_part == reference:
+    if date_part == reference_date:
         prefix = "today"
-    elif date_part == reference + timedelta(days=1):
+    elif date_part == reference_date + timedelta(days=1):
         prefix = "tomorrow"
     else:
         prefix = date_part.isoformat()
@@ -369,5 +372,5 @@ def schedule_summary(containers: list[Container], settings: Settings, reference:
     events.sort(key=lambda item: item[0])
     summary: list[str] = []
     for next_time, name, label in events[:10]:
-        summary.append(f"{_format_human(next_time)} {name} ({_short_label(label)})")
+        summary.append(f"{_format_human(next_time, reference)} {name} ({_short_label(label)})")
     return summary
