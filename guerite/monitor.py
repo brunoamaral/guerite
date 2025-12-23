@@ -243,8 +243,28 @@ def restart_container(
     temp_new_name = f"{name}-guerite-new-{short_suffix}"
 
     mounts = container.attrs.get("Mounts") or []
+    networking = container.attrs.get("NetworkSettings", {}).get("Networks")
+
+    endpoint_map: dict[str, dict] = {}
+    if networking is not None:
+        for network_name, network_cfg in networking.items():
+            ipam_cfg = network_cfg.get("IPAMConfig") or {}
+            endpoint = {
+                "aliases": network_cfg.get("Aliases"),
+                "links": network_cfg.get("Links"),
+                "ipv4_address": ipam_cfg.get("IPv4Address"),
+                "ipv6_address": ipam_cfg.get("IPv6Address"),
+                "link_local_ips": ipam_cfg.get("LinkLocalIPs"),
+                "driver_opt": network_cfg.get("DriverOpts"),
+            }
+            endpoint = {key: value for key, value in endpoint.items() if value}
+            if endpoint:
+                endpoint_map[network_name] = client.api.create_endpoint_config(**endpoint)
 
     create_kwargs = {
+        "attach_stderr": config.get("AttachStderr"),
+        "attach_stdin": config.get("AttachStdin"),
+        "attach_stdout": config.get("AttachStdout"),
         "command": config.get("Cmd"),
         "domainname": config.get("Domainname"),
         "entrypoint": config.get("Entrypoint"),
@@ -259,6 +279,7 @@ def restart_container(
         "network_disabled": config.get("NetworkDisabled"),
         "ports": ports,
         "runtime": host_config.get("Runtime") if isinstance(host_config, dict) else None,
+        "shell": config.get("Shell"),
         "stdin_open": config.get("OpenStdin"),
         "stop_signal": config.get("StopSignal"),
         "stop_timeout": config.get("StopTimeout"),
@@ -267,6 +288,9 @@ def restart_container(
         "volumes": config.get("Volumes"),
         "working_dir": config.get("WorkingDir"),
     }
+
+    if endpoint_map:
+        create_kwargs["networking_config"] = client.api.create_networking_config(endpoint_map)
 
     create_kwargs = {key: value for key, value in create_kwargs.items() if value is not None}
 
@@ -285,18 +309,23 @@ def restart_container(
             raise DockerException("create_container returned no Id")
         if networking is not None:
             for network_name, network_cfg in networking.items():
-                ipam_cfg = network_cfg.get("IPAMConfig") or {}
-                client.api.connect_container_to_network(
-                    new_id,
-                    network_name,
-                    aliases=network_cfg.get("Aliases"),
-                    links=network_cfg.get("Links"),
-                    ipv4_address=ipam_cfg.get("IPv4Address"),
-                    ipv6_address=ipam_cfg.get("IPv6Address"),
-                    link_local_ips=ipam_cfg.get("LinkLocalIPs"),
-                    driver_opt=network_cfg.get("DriverOpts"),
-                    mac_address=network_cfg.get("MacAddress"),
-                )
+                mac_address = network_cfg.get("MacAddress")
+                if mac_address:
+                    ipam_cfg = network_cfg.get("IPAMConfig") or {}
+                    try:
+                        client.api.connect_container_to_network(
+                            new_id,
+                            network_name,
+                            aliases=network_cfg.get("Aliases"),
+                            links=network_cfg.get("Links"),
+                            ipv4_address=ipam_cfg.get("IPv4Address"),
+                            ipv6_address=ipam_cfg.get("IPv6Address"),
+                            link_local_ips=ipam_cfg.get("LinkLocalIPs"),
+                            driver_opt=network_cfg.get("DriverOpts"),
+                            mac_address=mac_address,
+                        )
+                    except APIError as error:
+                        LOG.debug("MAC attach skipped for %s on %s: %s", original_name, network_name, error)
         client.api.rename(new_id, original_name)
         client.api.start(new_id)
         LOG.info("Restarted %s", original_name)
