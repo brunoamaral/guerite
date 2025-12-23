@@ -1,5 +1,6 @@
 from logging import getLogger
 from math import ceil
+from socket import gethostname
 from threading import Event, Thread
 from time import sleep
 
@@ -7,7 +8,8 @@ from docker import DockerClient
 from docker.errors import DockerException
 
 from .config import Settings, load_settings
-from .monitor import next_wakeup, run_once, select_monitored_containers
+from .monitor import next_wakeup, run_once, schedule_summary, select_monitored_containers
+from .notifier import notify_pushover
 from .utils import configure_logging, now_tz
 
 LOG = getLogger(__name__)
@@ -71,9 +73,20 @@ def main() -> None:
     LOG.info("Starting Guerite")
     wake_signal = Event()
     start_event_listener(client, settings, wake_signal)
+    logged_schedule = False
+    hostname = gethostname()
     while True:
         timestamp = now_tz(settings.timezone)
         containers = select_monitored_containers(client, settings)
+        if not logged_schedule:
+            summary = schedule_summary(containers, settings, reference=timestamp)
+            if summary:
+                LOG.info("Upcoming checks: %s", "; ".join(summary))
+                if "startup" in settings.notifications:
+                    notify_pushover(settings, f"Guerite on {hostname}", "Next checks:\n" + "\n".join(summary))
+            else:
+                LOG.info("No upcoming checks found")
+            logged_schedule = True
         run_once(client, settings, timestamp=timestamp, containers=containers)
         next_run_at = next_wakeup(containers, settings, reference=timestamp)
         delta_seconds = (next_run_at - now_tz(settings.timezone)).total_seconds()

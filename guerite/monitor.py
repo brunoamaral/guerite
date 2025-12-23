@@ -333,3 +333,42 @@ def _upcoming_runs(iterator: croniter, count: int) -> list[datetime]:
         except (StopIteration, ValueError):
             break
     return runs
+
+
+def _format_human(dt: datetime) -> str:
+    today = reference = now_utc().date()
+    date_part = dt.date()
+    if date_part == reference:
+        prefix = "today"
+    elif date_part == reference + timedelta(days=1):
+        prefix = "tomorrow"
+    else:
+        prefix = date_part.isoformat()
+    return f"{prefix} {dt.strftime('%H:%M')}"
+
+
+def _short_label(label: str) -> str:
+    if label.startswith("guerite."):
+        return label.split(".", 1)[1]
+    return label
+
+
+def schedule_summary(containers: list[Container], settings: Settings, reference: datetime) -> list[str]:
+    events: list[tuple[datetime, str, str]] = []
+    for container in containers:
+        for label_key in (settings.update_label, settings.restart_label, settings.health_label):
+            cron_expression = container.labels.get(label_key)
+            if cron_expression is None:
+                continue
+            try:
+                iterator = croniter(cron_expression, reference, ret_type=datetime)
+                next_time = iterator.get_next(datetime)
+                events.append((next_time, container.name, label_key))
+            except (ValueError, KeyError):
+                continue
+
+    events.sort(key=lambda item: item[0])
+    summary: list[str] = []
+    for next_time, name, label in events[:10]:
+        summary.append(f"{_format_human(next_time)} {name} ({_short_label(label)})")
+    return summary
