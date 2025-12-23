@@ -56,7 +56,7 @@ def is_monitored_event(event: dict, settings: Settings) -> bool:
     }:
         return False
     attributes = event.get("Actor", {}).get("Attributes", {})
-    for label in (settings.update_label, settings.restart_label, settings.health_label):
+    for label in (settings.update_label, settings.restart_label, settings.recreate_label, settings.health_label):
         if label in attributes:
             return True
     return False

@@ -14,5 +14,7 @@ services:
     image: nginx:alpine
     labels:
       guerite.update: "*/10 * * * *"
+      # Optional: force a periodic container recreation (no image pull)
+      # guerite.recreate: "0 4 * * *"
       guerite.health_check: "*/5 * * * *"
     restart: unless-stopped

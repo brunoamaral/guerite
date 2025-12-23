@@ -66,7 +66,7 @@ def _save_health_backoff(state_file: str) -> None:
 
 
 def select_monitored_containers(client: DockerClient, settings: Settings) -> list[Container]:
-    labels = [settings.update_label, settings.restart_label, settings.health_label]
+    labels = [settings.update_label, settings.restart_label, settings.recreate_label, settings.health_label]
     seen: dict[str, Container] = {}
     for label in labels:
         if label is None:
@@ -702,10 +702,16 @@ def run_once(
     for container in monitored:
         update_due = _cron_matches(container, settings.update_label, current_time)
         restart_due = _cron_matches(container, settings.restart_label, current_time)
+        recreate_due = _cron_matches(container, settings.recreate_label, current_time)
         health_due = _cron_matches(container, settings.health_label, current_time)
-        if (update_due or health_due) and _is_swarm_managed(container):
+        if (update_due or recreate_due or health_due) and _is_swarm_managed(container):
             LOG.warning("Skipping %s; swarm-managed containers may lose secrets/configs if recreated", container.name)
-            if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
+            if (
+                _should_notify(settings, "restart")
+                or _should_notify(settings, "recreate")
+                or _should_notify(settings, "update")
+                or _should_notify(settings, "health")
+            ):
                 event_log.append(f"Skipping swarm-managed container {container.name}; secrets/configs not safely restorable")
             continue
         if health_due and not _has_healthcheck(container):
@@ -718,7 +724,7 @@ def run_once(
             recently_started = _started_recently(container, current_time, settings.health_backoff_seconds)
         unhealthy_now = health_due and not recently_started and _is_unhealthy(container)
 
-        if not any([update_due, restart_due, unhealthy_now]):
+        if not any([update_due, restart_due, recreate_due, unhealthy_now]):
             LOG.debug("Skipping %s; no actions scheduled now", container.name)
             continue
 
@@ -764,6 +770,41 @@ def run_once(
             if update_executed:
                 continue
 
+            if recreate_due and not unhealthy_now:
+                if not _restart_allowed(container.id, current_time, settings):
+                    if (
+                        _should_notify(settings, "restart")
+                        or _should_notify(settings, "recreate")
+                        or _should_notify(settings, "update")
+                        or _should_notify(settings, "health")
+                    ):
+                        backoff_until = _RESTART_BACKOFF.get(container.id)
+                        if backoff_until is not None:
+                            _notify_restart_backoff(container.name, container.id, backoff_until, event_log, settings)
+                    continue
+
+                LOG.info("Recreating %s (scheduled recreate)", container.name)
+                if settings.dry_run:
+                    LOG.info("Dry-run enabled; not recreating %s", container.name)
+                    continue
+                notify_recreate = _should_notify(settings, "recreate")
+                image_id = current_image_id(container)
+                if notify_recreate:
+                    event_log.append(
+                        f"Recreating {container.name} (scheduled recreate) ({_short_id(image_id)})"
+                    )
+                if restart_container(
+                    client,
+                    container,
+                    image_ref,
+                    image_id,
+                    settings,
+                    event_log,
+                    notify_recreate,
+                ):
+                    pass
+                continue
+
         if unhealthy_now and not _health_allowed(container.id, current_time, settings):
             continue
         if health_due and recently_started:
@@ -791,7 +832,12 @@ def run_once(
 
         if unhealthy_now:
             if not _restart_allowed(container.id, current_time, settings):
-                if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
+                if (
+                    _should_notify(settings, "restart")
+                    or _should_notify(settings, "recreate")
+                    or _should_notify(settings, "update")
+                    or _should_notify(settings, "health")
+                ):
                     backoff_until = _RESTART_BACKOFF.get(container.id)
                     if backoff_until is not None:
                         _notify_restart_backoff(container.name, container.id, backoff_until, event_log, settings)
@@ -836,7 +882,7 @@ def run_once(
 def next_wakeup(containers: list[Container], settings: Settings, reference: datetime) -> datetime:
     candidates: list[datetime] = []
     for container in containers:
-        for label_key in (settings.update_label, settings.restart_label, settings.health_label):
+        for label_key in (settings.update_label, settings.restart_label, settings.recreate_label, settings.health_label):
             cron_expression = container.labels.get(label_key)
             if cron_expression is None:
                 LOG.debug("%s has no %s; ignoring for scheduling", container.name, label_key)
@@ -896,7 +942,7 @@ def _short_label(label: str) -> str:
 def schedule_summary(containers: list[Container], settings: Settings, reference: datetime) -> list[str]:
     events: list[tuple[datetime, str, str]] = []
     for container in containers:
-        for label_key in (settings.update_label, settings.restart_label, settings.health_label):
+        for label_key in (settings.update_label, settings.restart_label, settings.recreate_label, settings.health_label):
             cron_expression = container.labels.get(label_key)
             if cron_expression is None:
                 continue

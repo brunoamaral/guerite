@@ -2,6 +2,8 @@
 
 Swarm mode needs service-aware handling; current code explicitly skips swarm-managed containers to avoid breaking secrets/configs. This document outlines what implementing swarm support would require.
 
+Note: actions that require creating a replacement container (image updates, health-triggered replacement, and scheduled `guerite.recreate`) are intentionally skipped for swarm-managed containers.
+
 ## Key differences
 - Target services, not standalone containers: work with ServiceSpec/ServiceID and tasks.
 - Recreate via service update: use ServiceUpdate to roll tasks with the new image while preserving the current spec.

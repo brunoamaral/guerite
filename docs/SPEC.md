@@ -1,6 +1,6 @@
 # Guerite
 
-![Keeping watch over your containers](guerite.png)
+![Keeping guard over your containers](guerite-256.png)
 
 Guerite is a small Docker container management tool written in Python that watches for changes to the images of running containers with a specific label and pulls and restarts those containers when their base images are updated.
 
@@ -12,7 +12,7 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 - Small container footprint (minimal Alpine base image with only the required Python runtime).
 - Talks to the local Docker daemon directly via the socket, but can also connect to remote Docker hosts.
 - Checks for image updates and notifies users via Pushover when new images are pulled and containers are restarted.
-- Containers to be monitored are identified by labels: `guerite.update` for image update checks, `guerite.restart` for scheduled restarts, and `guerite.health_check` for scheduled health checks that trigger restarts when the container is not `healthy` (rate-limited by a configurable backoff). The update/restart/health labels carry cron expressions (e.g., `guerite.update: "*/10 * * * *"`).
+- Containers to be monitored are identified by labels: `guerite.update` for image update checks, `guerite.restart` for scheduled in-place restarts, `guerite.recreate` for scheduled container recreation, and `guerite.health_check` for scheduled health checks that trigger restarts when the container is not `healthy` (rate-limited by a configurable backoff). The labels carry cron expressions (e.g., `guerite.update: "*/10 * * * *"`).
 - Watches for new containers that are started with the appropriate label.
 - Configurable via environment variables for Pushover integration.
 - Notifications can be enabled per event type (update/restart/health/startup) via `GUERITE_NOTIFICATIONS`.
@@ -24,24 +24,33 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 
 ## Configuration
 
-- `DOCKER_HOST` (default `unix://var/run/docker.sock`): Docker endpoint to use.
-- `GUERITE_UPDATE_LABEL` (default `guerite.update`): Label key containing cron expressions that schedule image update checks.
-- `GUERITE_RESTART_LABEL` (default `guerite.restart`): Label key containing cron expressions that schedule forced restarts (without pulling).
-- `GUERITE_HEALTH_CHECK_LABEL` (default `guerite.health_check`): Label key containing cron expressions that schedule health checks/restarts.
-- `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` (default `300`): Minimum seconds between health-based restarts per container.
-- `GUERITE_STATE_FILE` (default `/tmp/guerite_state.json`): Path to persist health backoff timing across restarts.
-- `GUERITE_PRUNE_CRON` (default unset): Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped.
-- `GUERITE_NOTIFICATIONS` (default `update`): Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `health`/`health_check`, `startup`, `detect`, `prune`.
-- `GUERITE_TZ` (default `UTC`): Time zone used to evaluate cron expressions.
-- `GUERITE_DRY_RUN` (default `false`): If `true`, log actions without restarting containers.
-- `GUERITE_LOG_LEVEL` (default `INFO`): Log level (e.g., `DEBUG`, `INFO`).
-- `GUERITE_PUSHOVER_TOKEN` / `GUERITE_PUSHOVER_USER`: Enable notifications when both are set.
-- `GUERITE_PUSHOVER_API` (default `https://api.pushover.net/1/messages.json`): Pushover endpoint override.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DOCKER_HOST` | `unix://var/run/docker.sock` | Docker endpoint to use. |
+| `GUERITE_UPDATE_LABEL` | `guerite.update` | Label key containing cron expressions that schedule image update checks. |
+| `GUERITE_RESTART_LABEL` | `guerite.restart` | Label key containing cron expressions that schedule in-place restarts (without pulling). |
+| `GUERITE_RECREATE_LABEL` | `guerite.recreate` | Label key containing cron expressions that schedule forced container recreation (swap to a newly created container without pulling). |
+| `GUERITE_HEALTH_CHECK_LABEL` | `guerite.health_check` | Label key containing cron expressions that schedule health checks/restarts. |
+| `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` | `300` | Minimum seconds between health-based restarts per container. |
+| `GUERITE_STATE_FILE` | `/tmp/guerite_state.json` | Path to persist health backoff timing across restarts. |
+| `GUERITE_PRUNE_CRON` | unset | Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped. |
+| `GUERITE_NOTIFICATIONS` | `update` | Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `recreate`, `health`/`health_check`, `startup`, `detect`, `prune`, `all`. |
+| `GUERITE_TZ` | `UTC` | Time zone used to evaluate cron expressions. |
+| `GUERITE_DRY_RUN` | `false` | If `true`, log actions without restarting containers. |
+| `GUERITE_LOG_LEVEL` | `INFO` | Log level (e.g., `DEBUG`, `INFO`). |
+| `GUERITE_PUSHOVER_TOKEN` | unset | Pushover app token; required to send Pushover notifications. |
+| `GUERITE_PUSHOVER_USER` | unset | Pushover user/group key; required to send Pushover notifications. |
+| `GUERITE_PUSHOVER_API` | `https://api.pushover.net/1/messages.json` | Pushover endpoint override. |
 
 ## Notifications
 
 - Update: sent when an image is pulled and the container is restarted (if `GUERITE_NOTIFICATIONS` includes `update`); failures to pull are also reported when update notifications are enabled.
 - Restart: sent on cron-driven restarts when `GUERITE_NOTIFICATIONS` includes `restart`; restart failures are also reported when enabled.
+- Recreate: sent on cron-driven recreation when `GUERITE_NOTIFICATIONS` includes `recreate`; recreate failures are also reported when enabled.
 - Health: sent on health-check-driven restarts when `GUERITE_NOTIFICATIONS` includes `health`/`health_check`; restart failures are reported when enabled.
 - Detect: sent when new monitored containers appear; batched to at most one notification per minute when `detect` is enabled.
 - Prune: sent when cron-driven image pruning runs or fails if `GUERITE_NOTIFICATIONS` includes `prune`.
+
+Special value:
+
+- `all`: enables all notification categories.
