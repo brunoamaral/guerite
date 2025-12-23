@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from datetime import timedelta
 from json import JSONDecodeError
@@ -232,6 +233,16 @@ def _short_id(identifier: Optional[str]) -> str:
     return identifier.split(":")[-1][:12]
 
 
+def _strip_guerite_suffix(name: str) -> str:
+    pattern = re.compile(r"^(.*)-guerite-(?:old|new)-[0-9a-f]{8}$")
+    current = name
+    while True:
+        match = pattern.match(current)
+        if match is None:
+            return current
+        current = match.group(1)
+
+
 def restart_container(
     client: DockerClient,
     container: Container,
@@ -245,13 +256,15 @@ def restart_container(
     networking = container.attrs.get("NetworkSettings", {}).get("Networks")
     name = container.name
 
+    base_name = _strip_guerite_suffix(name)
+
     exposed_ports = config.get("ExposedPorts")
     ports = list(exposed_ports.keys()) if isinstance(exposed_ports, dict) else None
 
-    original_name = name
+    original_name = base_name
     short_suffix = container.id[:8]
-    temp_old_name = f"{name}-guerite-old-{short_suffix}"
-    temp_new_name = f"{name}-guerite-new-{short_suffix}"
+    temp_old_name = f"{base_name}-guerite-old-{short_suffix}"
+    temp_new_name = f"{base_name}-guerite-new-{short_suffix}"
 
     mounts = container.attrs.get("Mounts") or []
     networking = container.attrs.get("NetworkSettings", {}).get("Networks")
