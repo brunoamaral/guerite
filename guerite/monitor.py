@@ -8,7 +8,7 @@ from json import load
 from logging import getLogger
 from os.path import exists
 from socket import gethostname
-from typing import Optional
+from typing import Any, Optional
 from time import sleep
 
 from croniter import croniter
@@ -483,6 +483,17 @@ def _short_id(identifier: Optional[str]) -> str:
     return identifier.split(":")[-1][:12]
 
 
+def _normalize_links_value(raw_links: Optional[Any]) -> Optional[list[str]]:
+    if raw_links in (None, False):
+        return None
+    if isinstance(raw_links, (list, tuple)):
+        return list(raw_links)
+    if isinstance(raw_links, dict):
+        return [f"{src}:{dest}" if dest else src for src, dest in raw_links.items()]
+    # Unknown shape; skip to avoid docker SDK unpack errors
+    return None
+
+
 def _action_allowed(base_name: str, now: datetime, settings: Settings) -> bool:
     if base_name in _IN_FLIGHT:
         LOG.debug("Skipping %s; action in-flight", base_name)
@@ -543,26 +554,18 @@ def restart_container(
     if networking is not None:
         for network_name, network_cfg in networking.items():
             ipam_cfg = network_cfg.get("IPAMConfig") or {}
+            links = _normalize_links_value(network_cfg.get("Links"))
             endpoint_kwargs = {
                 "aliases": network_cfg.get("Aliases"),
-                "links": network_cfg.get("Links"),
+                "links": links,
                 "ipv4_address": ipam_cfg.get("IPv4Address"),
                 "ipv6_address": ipam_cfg.get("IPv6Address"),
                 "link_local_ips": ipam_cfg.get("LinkLocalIPs"),
                 "driver_opt": network_cfg.get("DriverOpts"),
                 "mac_address": network_cfg.get("MacAddress"),
-                "priority": network_cfg.get("GatewayPriority") or network_cfg.get("GwPriority"),
             }
             endpoint_kwargs = {key: value for key, value in endpoint_kwargs.items() if value is not None}
-            try:
-                endpoint_map[network_name] = client.api.create_endpoint_config(**endpoint_kwargs)
-            except TypeError:
-                if "priority" in endpoint_kwargs:
-                    fallback = {key: value for key, value in endpoint_kwargs.items() if key != "priority"}
-                    LOG.debug("create_endpoint_config without priority for %s", network_name)
-                    endpoint_map[network_name] = client.api.create_endpoint_config(**fallback)
-                else:
-                    raise
+            endpoint_map[network_name] = client.api.create_endpoint_config(**endpoint_kwargs)
 
     create_kwargs = {
         "command": config.get("Cmd"),
@@ -614,12 +617,13 @@ def restart_container(
                 mac_address = network_cfg.get("MacAddress")
                 if mac_address:
                     ipam_cfg = network_cfg.get("IPAMConfig") or {}
+                    links = _normalize_links_value(network_cfg.get("Links"))
                     try:
                         client.api.connect_container_to_network(
                             new_id,
                             network_name,
                             aliases=network_cfg.get("Aliases"),
-                            links=network_cfg.get("Links"),
+                            links=links,
                             ipv4_address=ipam_cfg.get("IPv4Address"),
                             ipv6_address=ipam_cfg.get("IPv6Address"),
                             link_local_ips=ipam_cfg.get("LinkLocalIPs"),

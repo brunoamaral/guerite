@@ -98,6 +98,7 @@ class DummyAPI:
         self.calls = []
         self.fail_connect = False
         self.raise_priority_type_error = False
+        self.endpoint_kwargs = {}
 
     def rename(self, cid, name):
         self.calls.append(("rename", cid, name))
@@ -106,9 +107,10 @@ class DummyAPI:
         self.calls.append(("create_container", kwargs))
         return {"Id": "new-id"}
 
-    def create_endpoint_config(self, **kwargs):  # pragma: no cover - unused in these tests
+    def create_endpoint_config(self, **kwargs):
         if self.raise_priority_type_error and "priority" in kwargs:
             raise TypeError("unexpected priority")
+        self.endpoint_kwargs = kwargs
         return {}
 
     def create_networking_config(self, *args, **kwargs):  # pragma: no cover - unused
@@ -244,11 +246,16 @@ def test_restart_container_health_rollback(monkeypatch, restart_settings: Settin
 
 def test_restart_container_network_priority_fallback(monkeypatch, restart_settings: Settings):
     client = DummyClient()
-    client.api.raise_priority_type_error = True
     container = DummyContainer("app")
     # Provide a network with priority to trigger fallback
     container.attrs["NetworkSettings"]["Networks"] = {
-        "net": {"IPAMConfig": {}, "GatewayPriority": 1, "MacAddress": None, "Aliases": None, "Links": None}
+        "net": {
+            "IPAMConfig": {},
+            "GatewayPriority": 1,
+            "MacAddress": None,
+            "Aliases": None,
+            "Links": {"svc": "alias"},
+        }
     }
 
     event_log = []
@@ -261,6 +268,9 @@ def test_restart_container_network_priority_fallback(monkeypatch, restart_settin
         event_log=event_log,
         notify=False,
     ) is True
+    # Ensure priority was stripped and links normalized
+    assert "priority" not in client.api.endpoint_kwargs
+    assert client.api.endpoint_kwargs.get("links") == ["svc:alias"]
 
 
 def test_restart_container_connect_failure(monkeypatch, restart_settings: Settings):
