@@ -18,6 +18,7 @@ DEFAULT_WEBHOOK_URL: str | None = None
 DEFAULT_ROLLBACK_GRACE_SECONDS = 3600
 DEFAULT_RESTART_RETRY_LIMIT = 3
 DEFAULT_DEPENDS_LABEL = "guerite.depends_on"
+DEFAULT_ACTION_COOLDOWN_SECONDS = 60
 
 
 ALL_NOTIFICATION_EVENTS: Set[str] = {
@@ -53,6 +54,7 @@ class Settings:
     rollback_grace_seconds: int
     restart_retry_limit: int
     depends_label: str
+    action_cooldown_seconds: int
 
 
 def load_settings() -> Settings:
@@ -85,6 +87,10 @@ def load_settings() -> Settings:
             DEFAULT_RESTART_RETRY_LIMIT,
         ),
         depends_label=getenv("GUERITE_DEPENDS_LABEL", DEFAULT_DEPENDS_LABEL),
+        action_cooldown_seconds=_env_int(
+            "GUERITE_ACTION_COOLDOWN_SECONDS",
+            DEFAULT_ACTION_COOLDOWN_SECONDS,
+        ),
     )
 
 

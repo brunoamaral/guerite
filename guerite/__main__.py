@@ -10,7 +10,15 @@ from docker import DockerClient
 from docker.errors import DockerException
 
 from .config import Settings, load_settings
-from .monitor import next_prune_time, next_wakeup, run_once, schedule_summary, select_monitored_containers
+from .monitor import (
+    _action_allowed,
+    _strip_guerite_suffix,
+    next_prune_time,
+    next_wakeup,
+    run_once,
+    schedule_summary,
+    select_monitored_containers,
+)
 from .notifier import notify_pushover
 from .utils import configure_logging, now_tz
 
@@ -92,6 +100,13 @@ def start_event_listener(client: DockerClient, settings: Settings, wake_signal: 
                     attributes = event.get("Actor", {}).get("Attributes", {})
                     name = attributes.get("name") or attributes.get("container") or attributes.get("com.docker.compose.service")
                     display = name or short_id
+                    raw_name = display.split("/")[-1] if display else short_id
+                    base_name = _strip_guerite_suffix(raw_name)
+                    current_time = now_tz(settings.timezone)
+                    # Skip events we likely triggered ourselves within cooldown
+                    if not _action_allowed(base_name, current_time, settings):
+                        LOG.debug("Ignoring event %s for %s (%s); in cooldown", action, display, short_id)
+                        continue
                     LOG.info("Docker event %s for %s (%s); waking up", action, display, short_id)
                     wake_signal.set()
             except DockerException as error:

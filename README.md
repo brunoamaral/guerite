@@ -10,7 +10,6 @@ It can also do dependency-aware ordering within a compose project using Docker `
 
 It provides Pushover and webhook notifications and talks directly to the Docker API, whether local or remote.
 
-
 ## Requirements
 
 - Docker API access (local socket or remote TCP/TLS endpoint)
@@ -33,9 +32,9 @@ docker build -t guerite .
 
 ```bash
 docker run --rm \
-	-v /var/run/docker.sock:/var/run/docker.sock:ro \
-	-e GUERITE_LOG_LEVEL=INFO \
-	guerite:latest
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -e GUERITE_LOG_LEVEL=INFO \
+    guerite:latest
 ```
 
 ### Run against a remote daemon (TLS)
@@ -44,38 +43,39 @@ Place `ca.pem`, `cert.pem`, and `key.pem` under `./certs` and point `DOCKER_HOST
 
 ```bash
 docker run --rm \
-	-e DOCKER_HOST=tcp://remote-docker-host:2376 \
-	-e DOCKER_TLS_VERIFY=1 \
-	-e DOCKER_CERT_PATH=/certs \
-	-v "$PWD"/certs:/certs:ro \
-	guerite:latest
+    -e DOCKER_HOST=tcp://remote-docker-host:2376 \
+    -e DOCKER_TLS_VERIFY=1 \
+    -e DOCKER_CERT_PATH=/certs \
+    -v "$PWD"/certs:/certs:ro \
+    guerite:latest
 ```
 
 ## Configuration
 
 Set environment variables to adjust behavior:
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DOCKER_HOST` | `unix://var/run/docker.sock` | Docker endpoint to use. |
-| `GUERITE_UPDATE_LABEL` | `guerite.update` | Label key containing cron expressions that schedule image update checks. |
-| `GUERITE_RESTART_LABEL` | `guerite.restart` | Label key containing cron expressions that schedule in-place restarts (without pulling). |
-| `GUERITE_RECREATE_LABEL` | `guerite.recreate` | Label key containing cron expressions that schedule forced container recreation (swap to a newly created container without pulling). |
-| `GUERITE_HEALTH_CHECK_LABEL` | `guerite.health_check` | Label key containing cron expressions that schedule health checks/restarts. |
-| `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` | `300` | Minimum seconds between health-based restarts per container. |
-| `GUERITE_PRUNE_CRON` | unset | Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped. |
-| `GUERITE_NOTIFICATIONS` | `update` | Comma-delimited list of events to notify via Pushover/webhook; accepted values: `update`, `restart`, `recreate`, `health`/`health_check`, `startup`, `detect`, `prune`, `all`. |
-| `GUERITE_ROLLBACK_GRACE_SECONDS` | `3600` | Keep temporary rollback containers/images for at least this many seconds before allowing prune to clean them up. |
-| `GUERITE_RESTART_RETRY_LIMIT` | `3` | Maximum consecutive restart/recreate attempts before backing off harder for that container. |
-| `GUERITE_DEPENDS_LABEL` | `guerite.depends_on` | Label key listing dependencies (comma-delimited base names) to gate and order restarts within a project. |
-| `GUERITE_TZ` | `UTC` | Time zone used to evaluate cron expressions. |
-| `GUERITE_STATE_FILE` | `/tmp/guerite_state.json` | Path to persist health backoff state across restarts; file must be writable. |
-| `GUERITE_DRY_RUN` | `false` | If `true`, log actions without restarting containers. |
-| `GUERITE_LOG_LEVEL` | `INFO` | Log level (e.g., `DEBUG`, `INFO`). |
-| `GUERITE_PUSHOVER_TOKEN` | unset | Pushover app token; required to send Pushover notifications. |
-| `GUERITE_PUSHOVER_USER` | unset | Pushover user/group key; required to send Pushover notifications. |
-| `GUERITE_PUSHOVER_API` | `https://api.pushover.net/1/messages.json` | Pushover endpoint override. |
-| `GUERITE_WEBHOOK_URL` | unset | If set, sends JSON `{ "title": ..., "message": ... }` POSTs to this URL for enabled events. |
+| Variable                               | Default                                    | Description                                                                                                                                                                    |
+| -------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DOCKER_HOST`                          | `unix://var/run/docker.sock`               | Docker endpoint to use.                                                                                                                                                        |
+| `GUERITE_UPDATE_LABEL`                 | `guerite.update`                           | Label key containing cron expressions that schedule image update checks.                                                                                                       |
+| `GUERITE_RESTART_LABEL`                | `guerite.restart`                          | Label key containing cron expressions that schedule in-place restarts (without pulling).                                                                                       |
+| `GUERITE_RECREATE_LABEL`               | `guerite.recreate`                         | Label key containing cron expressions that schedule forced container recreation (swap to a newly created container without pulling).                                           |
+| `GUERITE_HEALTH_CHECK_LABEL`           | `guerite.health_check`                     | Label key containing cron expressions that schedule health checks/restarts.                                                                                                    |
+| `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` | `300`                                      | Minimum seconds between health-based restarts per container.                                                                                                                   |
+| `GUERITE_PRUNE_CRON`                   | unset                                      | Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped.                                                                       |
+| `GUERITE_NOTIFICATIONS`                | `update`                                   | Comma-delimited list of events to notify via Pushover/webhook; accepted values: `update`, `restart`, `recreate`, `health`/`health_check`, `startup`, `detect`, `prune`, `all`. |
+| `GUERITE_ROLLBACK_GRACE_SECONDS`       | `3600`                                     | Keep temporary rollback containers/images for at least this many seconds before allowing prune to clean them up.                                                               |
+| `GUERITE_RESTART_RETRY_LIMIT`          | `3`                                        | Maximum consecutive restart/recreate attempts before backing off harder for that container.                                                                                    |
+| `GUERITE_DEPENDS_LABEL`                | `guerite.depends_on`                       | Label key listing dependencies (comma-delimited base names) to gate and order restarts within a project.                                                                       |
+| `GUERITE_ACTION_COOLDOWN_SECONDS`      | `60`                                       | Minimum seconds between actions on the same container name to avoid repeated triggers in a short window.                                                                       |
+| `GUERITE_TZ`                           | `UTC`                                      | Time zone used to evaluate cron expressions.                                                                                                                                   |
+| `GUERITE_STATE_FILE`                   | `/tmp/guerite_state.json`                  | Path to persist health backoff state across restarts; file must be writable.                                                                                                   |
+| `GUERITE_DRY_RUN`                      | `false`                                    | If `true`, log actions without restarting containers.                                                                                                                          |
+| `GUERITE_LOG_LEVEL`                    | `INFO`                                     | Log level (e.g., `DEBUG`, `INFO`).                                                                                                                                             |
+| `GUERITE_PUSHOVER_TOKEN`               | unset                                      | Pushover app token; required to send Pushover notifications.                                                                                                                   |
+| `GUERITE_PUSHOVER_USER`                | unset                                      | Pushover user/group key; required to send Pushover notifications.                                                                                                              |
+| `GUERITE_PUSHOVER_API`                 | `https://api.pushover.net/1/messages.json` | Pushover endpoint override.                                                                                                                                                    |
+| `GUERITE_WEBHOOK_URL`                  | unset                                      | If set, sends JSON `{ "title": ..., "message": ... }` POSTs to this URL for enabled events.                                                                                    |
 
 ## Container labels
 
@@ -184,7 +184,7 @@ Guerite can emit notifications as it moves through the lifecycle. Notifications 
   - `detect`: sent when newly monitored containers are discovered; detect notifications are rate-limited and may be batched.
   - `update`: sent when a new image is pulled and a container is successfully replaced; pull failures may also be reported when update notifications are enabled.
   - `restart`: sent for scheduled in-place restarts and restart failures (when enabled).
- `recreate`: sent for scheduled recreation and recreate failures (when enabled).
+    `recreate`: sent for scheduled recreation and recreate failures (when enabled).
   - `health` / `health_check`: sent for health-triggered restarts and failures (when enabled).
   - `prune`: sent when scheduled image pruning runs or fails (when enabled).
 - `all`: special value that enables all notification categories.

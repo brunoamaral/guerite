@@ -24,25 +24,26 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 
 ## Configuration
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DOCKER_HOST` | `unix://var/run/docker.sock` | Docker endpoint to use. |
-| `GUERITE_UPDATE_LABEL` | `guerite.update` | Label key containing cron expressions that schedule image update checks. |
-| `GUERITE_RESTART_LABEL` | `guerite.restart` | Label key containing cron expressions that schedule in-place restarts (without pulling). |
-| `GUERITE_RECREATE_LABEL` | `guerite.recreate` | Label key containing cron expressions that schedule forced container recreation (swap to a newly created container without pulling). |
-| `GUERITE_HEALTH_CHECK_LABEL` | `guerite.health_check` | Label key containing cron expressions that schedule health checks/restarts. |
-| `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` | `300` | Minimum seconds between health-based restarts per container. |
-| `GUERITE_STATE_FILE` | `/tmp/guerite_state.json` | Path to persist health backoff timing across restarts. |
-| `GUERITE_PRUNE_CRON` | unset | Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped. |
-| `GUERITE_NOTIFICATIONS` | `update` | Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `recreate`, `health`/`health_check`, `startup`, `detect`, `prune`, `all`. |
-| `GUERITE_RESTART_RETRY_LIMIT` | `3` | Max consecutive restart/recreate attempts before extended backoff. |
-| `GUERITE_DEPENDS_LABEL` | `guerite.depends_on` | Label key listing dependencies (comma list of base names). |
-| `GUERITE_TZ` | `UTC` | Time zone used to evaluate cron expressions. |
-| `GUERITE_DRY_RUN` | `false` | If `true`, log actions without restarting containers. |
-| `GUERITE_LOG_LEVEL` | `INFO` | Log level (e.g., `DEBUG`, `INFO`). |
-| `GUERITE_PUSHOVER_TOKEN` | unset | Pushover app token; required to send Pushover notifications. |
-| `GUERITE_PUSHOVER_USER` | unset | Pushover user/group key; required to send Pushover notifications. |
-| `GUERITE_PUSHOVER_API` | `https://api.pushover.net/1/messages.json` | Pushover endpoint override. |
+| Variable                               | Default                                    | Description                                                                                                                                                            |
+| -------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DOCKER_HOST`                          | `unix://var/run/docker.sock`               | Docker endpoint to use.                                                                                                                                                |
+| `GUERITE_UPDATE_LABEL`                 | `guerite.update`                           | Label key containing cron expressions that schedule image update checks.                                                                                               |
+| `GUERITE_RESTART_LABEL`                | `guerite.restart`                          | Label key containing cron expressions that schedule in-place restarts (without pulling).                                                                               |
+| `GUERITE_RECREATE_LABEL`               | `guerite.recreate`                         | Label key containing cron expressions that schedule forced container recreation (swap to a newly created container without pulling).                                   |
+| `GUERITE_HEALTH_CHECK_LABEL`           | `guerite.health_check`                     | Label key containing cron expressions that schedule health checks/restarts.                                                                                            |
+| `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` | `300`                                      | Minimum seconds between health-based restarts per container.                                                                                                           |
+| `GUERITE_STATE_FILE`                   | `/tmp/guerite_state.json`                  | Path to persist health backoff timing across restarts.                                                                                                                 |
+| `GUERITE_PRUNE_CRON`                   | unset                                      | Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped.                                                               |
+| `GUERITE_NOTIFICATIONS`                | `update`                                   | Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `recreate`, `health`/`health_check`, `startup`, `detect`, `prune`, `all`. |
+| `GUERITE_RESTART_RETRY_LIMIT`          | `3`                                        | Max consecutive restart/recreate attempts before extended backoff.                                                                                                     |
+| `GUERITE_DEPENDS_LABEL`                | `guerite.depends_on`                       | Label key listing dependencies (comma list of base names).                                                                                                             |
+| `GUERITE_ACTION_COOLDOWN_SECONDS`      | `60`                                       | Minimum seconds between actions on the same container name to avoid rapid repeat triggers.                                                                             |
+| `GUERITE_TZ`                           | `UTC`                                      | Time zone used to evaluate cron expressions.                                                                                                                           |
+| `GUERITE_DRY_RUN`                      | `false`                                    | If `true`, log actions without restarting containers.                                                                                                                  |
+| `GUERITE_LOG_LEVEL`                    | `INFO`                                     | Log level (e.g., `DEBUG`, `INFO`).                                                                                                                                     |
+| `GUERITE_PUSHOVER_TOKEN`               | unset                                      | Pushover app token; required to send Pushover notifications.                                                                                                           |
+| `GUERITE_PUSHOVER_USER`                | unset                                      | Pushover user/group key; required to send Pushover notifications.                                                                                                      |
+| `GUERITE_PUSHOVER_API`                 | `https://api.pushover.net/1/messages.json` | Pushover endpoint override.                                                                                                                                            |
 
 ## Notifications
 
@@ -65,5 +66,6 @@ Special value:
 - Compose `depends_on` is not exposed by Docker; use `guerite.depends_on` to mirror those relationships.
 
 Example labels:
+
 - `guerite.depends_on=db,cache`
 - `guerite.update=*/10 * * * *`

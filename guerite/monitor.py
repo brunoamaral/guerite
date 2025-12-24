@@ -33,6 +33,8 @@ _PENDING_DETECTS: list[str] = []
 _LAST_DETECT_NOTIFY: Optional[datetime] = None
 _RESTART_BACKOFF: dict[str, datetime] = {}
 _RESTART_FAIL_COUNT: dict[str, int] = {}
+_LAST_ACTION: dict[str, datetime] = {}
+_IN_FLIGHT: set[str] = set()
 
 
 def _compose_project(container: Container) -> Optional[str]:
@@ -260,25 +262,35 @@ def _preflight_mounts(name: str, mounts: list[dict], notify: bool, event_log: li
                     )
 
 
-def _health_allowed(container_id: str, now: datetime, settings: Settings) -> bool:
+def _health_allowed(container_id: str, base_name: str, now: datetime, settings: Settings) -> bool:
     next_time = _HEALTH_BACKOFF.get(container_id)
     if next_time is None:
         return True
     if now >= next_time:
         return True
     remaining = (next_time - now).total_seconds()
-    LOG.debug("Skipping unhealthy restart for %s; backoff %.0fs remaining", container_id, remaining)
+    LOG.debug(
+        "Skipping unhealthy restart for %s (%s); backoff %.0fs remaining",
+        base_name,
+        _short_id(container_id),
+        remaining,
+    )
     return False
 
 
-def _restart_allowed(container_id: str, now: datetime, settings: Settings) -> bool:
+def _restart_allowed(container_id: str, base_name: str, now: datetime, settings: Settings) -> bool:
     next_time = _RESTART_BACKOFF.get(container_id)
     if next_time is None:
         return True
     if now >= next_time:
         return True
     remaining = (next_time - now).total_seconds()
-    LOG.debug("Skipping restart for %s; recreate backoff %.0fs remaining", container_id, remaining)
+    LOG.debug(
+        "Skipping restart for %s (%s); recreate backoff %.0fs remaining",
+        base_name,
+        _short_id(container_id),
+        remaining,
+    )
     return False
 
 
@@ -328,7 +340,7 @@ def _wait_for_healthy(client: DockerClient, container_id: str, timeout_seconds: 
                 sleep(2)
                 continue
         except DockerException as error:
-            LOG.debug("Health inspect failed for %s: %s", container_id, error)
+            LOG.debug("Health inspect failed for %s: %s", _short_id(container_id), error)
         sleep(2)
     return False, last_status
 
@@ -469,6 +481,25 @@ def _short_id(identifier: Optional[str]) -> str:
     if identifier is None:
         return "unknown"
     return identifier.split(":")[-1][:12]
+
+
+def _action_allowed(base_name: str, now: datetime, settings: Settings) -> bool:
+    if base_name in _IN_FLIGHT:
+        LOG.debug("Skipping %s; action in-flight", base_name)
+        return False
+    last = _LAST_ACTION.get(base_name)
+    if last is None:
+        return True
+    if (now - last).total_seconds() >= settings.action_cooldown_seconds:
+        return True
+    remaining = settings.action_cooldown_seconds - (now - last).total_seconds()
+    LOG.debug("Skipping %s; action cooldown %.0fs remaining", base_name, remaining)
+    return False
+
+
+def _mark_action(base_name: str, when: datetime) -> None:
+    _LAST_ACTION[base_name] = when
+    _IN_FLIGHT.add(base_name)
 
 
 def _strip_guerite_suffix(name: str) -> str:
@@ -678,11 +709,11 @@ def remove_old_image(
         return
     try:
         client.images.remove(image=old_image_id)
-        LOG.info("Removed old image %s", old_image_id)
+        LOG.info("Removed old image %s", _short_id(old_image_id))
         if notify:
             event_log.append(f"Removing image ({_short_id(old_image_id)})")
     except (APIError, DockerException) as error:
-        LOG.warning("Could not remove old image %s: %s", old_image_id, error)
+        LOG.warning("Could not remove old image %s: %s", _short_id(old_image_id), error)
         if notify:
             event_log.append(f"Failed to remove image ({_short_id(old_image_id)}): {error}")
 
@@ -809,6 +840,10 @@ def run_once(
         if skip_container:
             continue
 
+        base_name = _base_name(container)
+        if not _action_allowed(base_name, current_time, settings):
+            continue
+
         update_due = _cron_matches(container, settings.update_label, current_time)
         restart_due = _cron_matches(container, settings.restart_label, current_time)
         recreate_due = _cron_matches(container, settings.recreate_label, current_time)
@@ -849,6 +884,7 @@ def run_once(
             pulled_image = pull_image(client, image_ref)
             if pulled_image is not None and needs_update(container, pulled_image):
                 LOG.info("Updating %s with image %s", container.name, image_ref)
+                _mark_action(base_name, current_time)
                 if notify_update:
                     event_log.append(
                         f"Found new {image_ref} image ({_short_id(pulled_image.id)})"
@@ -880,7 +916,7 @@ def run_once(
                 continue
 
             if recreate_due and not unhealthy_now:
-                if not _restart_allowed(container.id, current_time, settings):
+                if not _restart_allowed(container.id, base_name, current_time, settings):
                     if (
                         _should_notify(settings, "restart")
                         or _should_notify(settings, "recreate")
@@ -893,6 +929,7 @@ def run_once(
                     continue
 
                 LOG.info("Recreating %s (scheduled recreate)", container.name)
+                _mark_action(base_name, current_time)
                 if settings.dry_run:
                     LOG.info("Dry-run enabled; not recreating %s", container.name)
                     continue
@@ -914,13 +951,14 @@ def run_once(
                     pass
                 continue
 
-        if unhealthy_now and not _health_allowed(container.id, current_time, settings):
+        if unhealthy_now and not _health_allowed(container.id, base_name, current_time, settings):
             continue
         if health_due and recently_started:
             LOG.debug("Skipping %s; healthcheck still in grace window", container.name)
             continue
         if restart_due and not unhealthy_now:
             LOG.info("Restarting %s (scheduled restart)", container.name)
+            _mark_action(base_name, current_time)
             if settings.dry_run:
                 LOG.info("Dry-run enabled; not restarting %s", container.name)
                 continue
@@ -940,7 +978,7 @@ def run_once(
             continue
 
         if unhealthy_now:
-            if not _restart_allowed(container.id, current_time, settings):
+            if not _restart_allowed(container.id, base_name, current_time, settings):
                 if (
                     _should_notify(settings, "restart")
                     or _should_notify(settings, "recreate")
@@ -953,6 +991,7 @@ def run_once(
                 continue
 
             LOG.info("Restarting %s due to unhealthy", container.name)
+            _mark_action(base_name, current_time)
             if settings.dry_run:
                 LOG.info("Dry-run enabled; not restarting %s", container.name)
                 continue
@@ -986,6 +1025,7 @@ def run_once(
         notify_pushover(settings, title, body)
         notify_webhook(settings, title, body)
     _flush_detect_notifications(settings, hostname, current_time)
+    _IN_FLIGHT.clear()
 
 
 def next_wakeup(
