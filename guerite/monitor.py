@@ -58,6 +58,15 @@ def _link_targets(container: Container) -> set[str]:
     return targets
 
 
+def _label_dependencies(container: Container, settings: Settings) -> set[str]:
+    labels = container.labels or {}
+    raw = labels.get(settings.depends_label)
+    if raw is None:
+        return set()
+    parts = [item.strip() for item in raw.split(",")]
+    return {_strip_guerite_suffix(item) for item in parts if item}
+
+
 def _toposort(names: set[str], deps: dict[str, set[str]]) -> list[str]:
     incoming = {name: set(deps.get(name, set())) & names for name in names}
     result: list[str] = []
@@ -75,7 +84,7 @@ def _toposort(names: set[str], deps: dict[str, set[str]]) -> list[str]:
     return result
 
 
-def _order_by_compose(containers: list[Container]) -> list[Container]:
+def _order_by_compose(containers: list[Container], settings: Settings) -> list[Container]:
     grouped: dict[Optional[str], list[Container]] = {}
     for container in containers:
         grouped.setdefault(_compose_project(container), []).append(container)
@@ -90,7 +99,9 @@ def _order_by_compose(containers: list[Container]) -> list[Container]:
         for container in items:
             base = _base_name(container)
             name_map[base] = container
-            deps[base] = _link_targets(container)
+            link_deps = _link_targets(container)
+            label_deps = _label_dependencies(container, settings)
+            deps[base] = link_deps | label_deps
         names = set(name_map.keys())
         for base in list(deps.keys()):
             deps[base] = {dep for dep in deps[base] if dep in names}
@@ -769,11 +780,35 @@ def run_once(
     current_time = timestamp or now_utc()
     prune_due = _prune_due(settings, current_time)
     monitored = containers if containers is not None else select_monitored_containers(client, settings)
-    monitored = _order_by_compose(monitored)
+    monitored = _order_by_compose(monitored, settings)
     _track_new_containers(monitored)
     event_log: list[str] = []
     hostname = gethostname()
+    base_map = {_base_name(container): container for container in monitored}
     for container in monitored:
+        deps = _label_dependencies(container, settings) | _link_targets(container)
+        deps = {dep for dep in deps if dep in base_map}
+        skip_container = False
+        for dep in deps:
+            dep_container = base_map.get(dep)
+            if dep_container is None:
+                continue
+            try:
+                dep_state = dep_container.attrs.get("State", {})
+                dep_running = bool(dep_state.get("Running"))
+            except DockerException:
+                dep_running = True
+            if not dep_running:
+                LOG.info("Skipping %s; dependency %s not running", container.name, dep)
+                skip_container = True
+                break
+            if _is_unhealthy(dep_container):
+                LOG.info("Skipping %s; dependency %s unhealthy", container.name, dep)
+                skip_container = True
+                break
+        if skip_container:
+            continue
+
         update_due = _cron_matches(container, settings.update_label, current_time)
         restart_due = _cron_matches(container, settings.restart_label, current_time)
         recreate_due = _cron_matches(container, settings.recreate_label, current_time)

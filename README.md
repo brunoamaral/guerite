@@ -6,7 +6,10 @@
 
 Guerite is a [watchtower](https://github.com/containrrr/watchtower) alternative that watches Docker containers that carry a specific label, pulls their base images when updates appear, and restarts the containers, as well as being able to regularly prune stale images.
 
+It can also do dependency-aware ordering within a compose project using Docker `Links` and/or a `guerite.depends_on` label, so supporting services (e.g., databases) are handled before their dependents.
+
 It provides Pushover and webhook notifications and talks directly to the Docker API, whether local or remote.
+
 
 ## Requirements
 
@@ -63,6 +66,8 @@ Set environment variables to adjust behavior:
 | `GUERITE_PRUNE_CRON` | unset | Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped. |
 | `GUERITE_NOTIFICATIONS` | `update` | Comma-delimited list of events to notify via Pushover/webhook; accepted values: `update`, `restart`, `recreate`, `health`/`health_check`, `startup`, `detect`, `prune`, `all`. |
 | `GUERITE_ROLLBACK_GRACE_SECONDS` | `3600` | Keep temporary rollback containers/images for at least this many seconds before allowing prune to clean them up. |
+| `GUERITE_RESTART_RETRY_LIMIT` | `3` | Maximum consecutive restart/recreate attempts before backing off harder for that container. |
+| `GUERITE_DEPENDS_LABEL` | `guerite.depends_on` | Label key listing dependencies (comma-delimited base names) to gate and order restarts within a project. |
 | `GUERITE_TZ` | `UTC` | Time zone used to evaluate cron expressions. |
 | `GUERITE_STATE_FILE` | `/tmp/guerite_state.json` | Path to persist health backoff state across restarts; file must be writable. |
 | `GUERITE_DRY_RUN` | `false` | If `true`, log actions without restarting containers. |
@@ -80,6 +85,13 @@ Add labels to any container you want Guerite to manage (any label opts the conta
 - `guerite.restart=0 3 * * *` schedules forced restarts at the specified cron times (no image pull).
 - `guerite.recreate=0 4 * * *` schedules forced container recreation at the specified cron times (no image pull).
 - `guerite.health_check=*/5 * * * *` runs a health check on the cron schedule; if the container is not `healthy`, it is restarted (rate-limited by the backoff).
+- `guerite.depends_on=db,cache` declares dependencies (by container base name) so this container is processed after its dependencies are running and healthy; also used to order operations within a compose project.
+
+### Dependency ordering
+
+- Containers are grouped by compose project (`com.docker.compose.project`) and ordered using Docker `Links` plus the `guerite.depends_on` label.
+- Actions are skipped for a container when any declared dependency is missing, stopped, or unhealthy.
+- Compose `depends_on` is not visible to Docker; use `guerite.depends_on` to express those relationships for Guerite.
 
 ## Container lifecycle
 

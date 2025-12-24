@@ -17,6 +17,7 @@ DEFAULT_PRUNE_CRON: str | None = None
 DEFAULT_WEBHOOK_URL: str | None = None
 DEFAULT_ROLLBACK_GRACE_SECONDS = 3600
 DEFAULT_RESTART_RETRY_LIMIT = 3
+DEFAULT_DEPENDS_LABEL = "guerite.depends_on"
 
 
 ALL_NOTIFICATION_EVENTS: Set[str] = {
@@ -51,6 +52,7 @@ class Settings:
     prune_cron: Optional[str]
     rollback_grace_seconds: int
     restart_retry_limit: int
+    depends_label: str
 
 
 def load_settings() -> Settings:
@@ -82,6 +84,7 @@ def load_settings() -> Settings:
             "GUERITE_RESTART_RETRY_LIMIT",
             DEFAULT_RESTART_RETRY_LIMIT,
         ),
+        depends_label=getenv("GUERITE_DEPENDS_LABEL", DEFAULT_DEPENDS_LABEL),
     )
 
 

@@ -12,7 +12,7 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 - Small container footprint (minimal Alpine base image with only the required Python runtime).
 - Talks to the local Docker daemon directly via the socket, but can also connect to remote Docker hosts.
 - Checks for image updates and notifies users via Pushover when new images are pulled and containers are restarted.
-- Containers to be monitored are identified by labels: `guerite.update` for image update checks, `guerite.restart` for scheduled in-place restarts, `guerite.recreate` for scheduled container recreation, and `guerite.health_check` for scheduled health checks that trigger restarts when the container is not `healthy` (rate-limited by a configurable backoff). The labels carry cron expressions (e.g., `guerite.update: "*/10 * * * *"`).
+- Containers to be monitored are identified by labels: `guerite.update` for image update checks, `guerite.restart` for scheduled in-place restarts, `guerite.recreate` for scheduled container recreation, and `guerite.health_check` for scheduled health checks that trigger restarts when the container is not `healthy` (rate-limited by a configurable backoff). The labels carry cron expressions (e.g., `guerite.update: "*/10 * * * *"`). Optional dependency ordering uses Docker `Links` and/or a `guerite.depends_on` label so supporting services are handled before their dependents; actions are skipped when declared dependencies are down or unhealthy.
 - Watches for new containers that are started with the appropriate label.
 - Configurable via environment variables for Pushover integration.
 - Notifications can be enabled per event type (update/restart/health/startup) via `GUERITE_NOTIFICATIONS`.
@@ -35,6 +35,8 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 | `GUERITE_STATE_FILE` | `/tmp/guerite_state.json` | Path to persist health backoff timing across restarts. |
 | `GUERITE_PRUNE_CRON` | unset | Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped. |
 | `GUERITE_NOTIFICATIONS` | `update` | Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `recreate`, `health`/`health_check`, `startup`, `detect`, `prune`, `all`. |
+| `GUERITE_RESTART_RETRY_LIMIT` | `3` | Max consecutive restart/recreate attempts before extended backoff. |
+| `GUERITE_DEPENDS_LABEL` | `guerite.depends_on` | Label key listing dependencies (comma list of base names). |
 | `GUERITE_TZ` | `UTC` | Time zone used to evaluate cron expressions. |
 | `GUERITE_DRY_RUN` | `false` | If `true`, log actions without restarting containers. |
 | `GUERITE_LOG_LEVEL` | `INFO` | Log level (e.g., `DEBUG`, `INFO`). |
@@ -54,3 +56,14 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 Special value:
 
 - `all`: enables all notification categories.
+
+## Dependency ordering
+
+- Express dependencies with Docker `Links` and/or a `guerite.depends_on` label (override key via `GUERITE_DEPENDS_LABEL`).
+- Containers are grouped by `com.docker.compose.project` and ordered topologically using those dependencies.
+- Guerite skips acting on a container if any declared dependency is missing, stopped, or unhealthy.
+- Compose `depends_on` is not exposed by Docker; use `guerite.depends_on` to mirror those relationships.
+
+Example labels:
+- `guerite.depends_on=db,cache`
+- `guerite.update=*/10 * * * *`
