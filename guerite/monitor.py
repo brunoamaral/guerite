@@ -172,9 +172,9 @@ def _preflight_mounts(name: str, mounts: list[dict], notify: bool, event_log: li
         if mount_type == "bind":
             source = mount.get("Source")
             if source and not exists(source):
-                LOG.warning("Bind source %s missing for %s; recreate may fail", source, name)
+                LOG.debug("Cannot validate bind source %s for %s; path not visible here; recreate may fail", source, name)
                 if notify:
-                    event_log.append(f"Bind source missing for {name}: {source}")
+                    event_log.append(f"Cannot validate bind source for {name}: {source}")
         elif mount_type == "volume":
             driver = mount.get("Driver")
             if driver and driver != "local":

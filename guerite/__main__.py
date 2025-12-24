@@ -86,7 +86,13 @@ def start_event_listener(client: DockerClient, settings: Settings, wake_signal: 
                         continue
                     if not is_monitored_event(event, settings):
                         continue
-                    LOG.info("Docker event %s on %s; waking up", event.get("Action"), event.get("id"))
+                    action = event.get("Action")
+                    container_id = event.get("id") or ""
+                    short_id = container_id.split(":")[-1][:12] if container_id else "unknown"
+                    attributes = event.get("Actor", {}).get("Attributes", {})
+                    name = attributes.get("name") or attributes.get("container") or attributes.get("com.docker.compose.service")
+                    display = name or short_id
+                    LOG.info("Docker event %s for %s (%s); waking up", action, display, short_id)
                     wake_signal.set()
             except DockerException as error:
                 LOG.warning("Event stream error: %s", error)
