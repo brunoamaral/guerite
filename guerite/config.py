@@ -7,6 +7,7 @@ DEFAULT_RESTART_LABEL = "guerite.restart"
 DEFAULT_RECREATE_LABEL = "guerite.recreate"
 DEFAULT_HEALTH_LABEL = "guerite.health_check"
 DEFAULT_HEALTH_BACKOFF_SECONDS = 300
+DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS = 60
 DEFAULT_NOTIFICATIONS = "update"
 DEFAULT_DOCKER_HOST = "unix://var/run/docker.sock"
 DEFAULT_PUSHOOVER_API = "https://api.pushover.net/1/messages.json"
@@ -41,6 +42,7 @@ class Settings:
     recreate_label: str
     health_label: str
     health_backoff_seconds: int
+    health_check_timeout_seconds: int
     notifications: Set[str]
     timezone: str
     pushover_token: Optional[str]
@@ -67,6 +69,10 @@ def load_settings() -> Settings:
         health_backoff_seconds=_env_int(
             "GUERITE_HEALTH_CHECK_BACKOFF_SECONDS",
             DEFAULT_HEALTH_BACKOFF_SECONDS,
+        ),
+        health_check_timeout_seconds=_env_int(
+            "GUERITE_HEALTH_CHECK_TIMEOUT_SECONDS",
+            DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS,
         ),
         notifications=_env_csv_set("GUERITE_NOTIFICATIONS", DEFAULT_NOTIFICATIONS),
         timezone=getenv("GUERITE_TZ", DEFAULT_TZ),

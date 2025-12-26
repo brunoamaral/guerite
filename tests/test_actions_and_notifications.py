@@ -38,6 +38,7 @@ def settings() -> Settings:
         recreate_label="guerite.recreate",
         health_label="guerite.health_check",
         health_backoff_seconds=30,
+        health_check_timeout_seconds=60,
         notifications={"update"},
         timezone="UTC",
         pushover_token="token",
@@ -99,6 +100,7 @@ class DummyAPI:
         self.fail_connect = False
         self.raise_priority_type_error = False
         self.endpoint_kwargs = {}
+        self.remove_failures_remaining = 0
 
     def rename(self, cid, name):
         self.calls.append(("rename", cid, name))
@@ -129,6 +131,9 @@ class DummyAPI:
 
     def remove_container(self, cid, force=False):
         self.calls.append(("remove", cid, force))
+        if self.remove_failures_remaining > 0:
+            self.remove_failures_remaining -= 1
+            raise monitor.DockerException("remove failed")
 
 
 class DummyImages:
@@ -143,7 +148,13 @@ class DummyImages:
 
 
 class DummyContainer:
-    def __init__(self, name: str, healthcheck=False):
+    def __init__(
+        self,
+        name: str,
+        healthcheck: bool = False,
+        stop_raises: bool = False,
+        remove_raises: Exception | None = None,
+    ):
         self.name = name
         self.id = f"{name}-id"
         self.labels = {}
@@ -157,14 +168,20 @@ class DummyContainer:
         self.stopped = False
         self.removed = False
         self.started = False
+        self.stop_raises = stop_raises
+        self.remove_raises = remove_raises
 
     def stop(self):
+        if self.stop_raises:
+            raise monitor.DockerException("stop failed")
         self.stopped = True
 
     def start(self):
         self.started = True
 
     def remove(self):
+        if self.remove_raises is not None:
+            raise self.remove_raises
         self.removed = True
 
 
@@ -184,6 +201,7 @@ def restart_settings(tmp_path) -> Settings:
         recreate_label="guerite.recreate",
         health_label="guerite.health_check",
         health_backoff_seconds=30,
+        health_check_timeout_seconds=60,
         notifications={"update"},
         timezone="UTC",
         pushover_token=None,
@@ -325,6 +343,86 @@ def test_restart_container_connect_success(monkeypatch, restart_settings: Settin
     )
     assert result is True
     assert any(call[0] == "connect" for call in client.api.calls)
+
+
+def test_restart_container_rollback_removes_new_before_restoring_old_on_late_failure(restart_settings: Settings):
+    client = DummyClient()
+    container = DummyContainer("app", remove_raises=RuntimeError("boom"))
+
+    event_log: list[str] = []
+    result = monitor.restart_container(
+        client,
+        container,
+        image_ref="repo:tag",
+        new_image_id="new-img",
+        settings=restart_settings,
+        event_log=event_log,
+        notify=False,
+    )
+    assert result is False
+
+    # Validate rollback ordering: free production name first (remove new) then restore old
+    calls = client.api.calls
+    idx_rename_new_back = next(
+        i
+        for i, call in enumerate(calls)
+        if call[0] == "rename" and call[1] == "new-id" and "-guerite-new-" in call[2]
+    )
+    idx_remove_new = next(
+        i
+        for i, call in enumerate(calls)
+        if call[0] == "remove" and call[1] == "new-id" and call[2] is True
+    )
+    idx_restore_old_name = next(
+        i
+        for i, call in enumerate(calls)
+        if call[0] == "rename" and call[1] == container.id and call[2] == "app"
+    )
+    assert idx_rename_new_back < idx_remove_new < idx_restore_old_name
+
+
+def test_restart_container_rollback_remove_failure_triggers_rename_away_and_retry(restart_settings: Settings):
+    client = DummyClient()
+    client.api.remove_failures_remaining = 1
+    container = DummyContainer("app", remove_raises=RuntimeError("boom"))
+
+    event_log: list[str] = []
+    result = monitor.restart_container(
+        client,
+        container,
+        image_ref="repo:tag",
+        new_image_id="new-img",
+        settings=restart_settings,
+        event_log=event_log,
+        notify=False,
+    )
+    assert result is False
+
+    # First rollback attempt to remove fails, then we rename-away and retry remove
+    calls = client.api.calls
+    assert ("rename", "new-id", "app-guerite-failed-new-id") in calls
+    remove_calls = [call for call in calls if call[0] == "remove" and call[1] == "new-id"]
+    assert len(remove_calls) == 2
+
+
+def test_restart_container_rollback_starts_old_container_even_if_stop_failed(restart_settings: Settings):
+    client = DummyClient()
+    container = DummyContainer("app", stop_raises=True, remove_raises=RuntimeError("boom"))
+
+    event_log: list[str] = []
+    result = monitor.restart_container(
+        client,
+        container,
+        image_ref="repo:tag",
+        new_image_id="new-img",
+        settings=restart_settings,
+        event_log=event_log,
+        notify=False,
+    )
+    assert result is False
+
+    # Rollback should attempt to start the original container regardless of stop outcome
+    assert ("start", container.id) in client.api.calls
 
 
 def test_save_health_backoff_errors_are_handled(tmp_path, caplog):

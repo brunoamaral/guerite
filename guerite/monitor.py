@@ -1,4 +1,4 @@
-import re
+from re import compile as re_compile
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -10,6 +10,7 @@ from os.path import exists
 from socket import gethostname
 from typing import Any, Optional
 from time import sleep
+from dataclasses import dataclass
 
 from croniter import croniter
 from docker import DockerClient
@@ -37,6 +38,18 @@ _RESTART_BACKOFF: dict[str, datetime] = {}
 _RESTART_FAIL_COUNT: dict[str, int] = {}
 _LAST_ACTION: dict[str, datetime] = {}
 _IN_FLIGHT: set[str] = set()
+
+
+@dataclass
+class ContainerRecreateState:
+    """Tracks the state of container recreation for proper rollback."""
+    old_renamed: bool = False
+    new_id: Optional[str] = None
+    old_stopped: bool = False
+    new_renamed_to_production: bool = False
+    original_name: Optional[str] = None
+    temp_old_name: Optional[str] = None
+    temp_new_name: Optional[str] = None
 
 
 def _compose_project(container: Container) -> Optional[str]:
@@ -572,7 +585,7 @@ def _mark_action(base_name: str, when: datetime) -> None:
 
 
 def _strip_guerite_suffix(name: str) -> str:
-    pattern = re.compile(r"^(.*)-guerite-(?:old|new)-[0-9a-f]{8}$")
+    pattern = re_compile(r"^(.*)-guerite-(?:old|new)-[0-9a-f]{8}$")
     current = name
     while True:
         match = pattern.match(current)
@@ -581,35 +594,141 @@ def _strip_guerite_suffix(name: str) -> str:
         current = match.group(1)
 
 
-def restart_container(
-    client: DockerClient,
-    container: Container,
-    image_ref: str,
-    new_image_id: Optional[str],
-    settings: Settings,
-    event_log: list[str],
-    notify: bool,
-) -> bool:
+def _rollback_container_recreation(client: DockerClient, state: ContainerRecreateState, container: Container) -> bool:
+    """Rollback container recreation by cleaning up new container and restoring old one.
+    
+    CRITICAL: Always remove new container FIRST to free up the name before renaming old container.
+    This prevents name conflicts if new container was renamed to production name before failure.
+    """
+    rollback_success = True
+    
+    try:
+        # Step 1: Remove new container if it was created
+        # MUST happen first to free up the production name if new container took it
+        # force=True will stop it if running and disconnect from all networks automatically
+        if state.new_id:
+            # If new container was renamed to production name, rename it back to temp first
+            if state.new_renamed_to_production and state.temp_new_name:
+                try:
+                    client.api.rename(state.new_id, state.temp_new_name)
+                    LOG.debug("Renamed new container back to temp name %s for cleanup", state.temp_new_name)
+                except DockerException as e:
+                    LOG.warning("Could not rename new container back to temp name: %s", e)
+            
+            try:
+                client.api.remove_container(state.new_id, force=True)
+                LOG.debug("Removed new container %s during rollback", _short_id(state.new_id))
+            except DockerException as e:
+                # If removal fails, try renaming it away to free up any name it might have
+                LOG.warning("Failed to remove new container %s during rollback: %s", 
+                           _short_id(state.new_id), e)
+                
+                if state.original_name:
+                    try:
+                        # Use a unique failed name to avoid conflicts
+                        temp_remove_name = f"{state.original_name}-guerite-failed-{state.new_id[:8]}"
+                        client.api.rename(state.new_id, temp_remove_name)
+                        LOG.debug("Renamed stuck new container to %s", temp_remove_name)
+                        # Try removal again
+                        try:
+                            client.api.remove_container(state.new_id, force=True)
+                            LOG.debug("Successfully removed new container after rename")
+                        except DockerException as e2:
+                            LOG.error("Could not remove new container even after rename: %s", e2)
+                            rollback_success = False
+                    except DockerException as e2:
+                        LOG.error("Could not rename new container away: %s", e2)
+                        rollback_success = False
+                else:
+                    rollback_success = False
+        
+        # Step 2: Restore old container if it was renamed
+        if state.old_renamed and state.original_name and container.id:
+            try:
+                # Rename back to original name
+                client.api.rename(container.id, state.original_name)
+                LOG.debug("Restored old container name to %s", state.original_name)
+                
+                # Always start the container (idempotent if already running)
+                # This ensures the container is running regardless of state tracking accuracy
+                try:
+                    client.api.start(container.id)
+                    LOG.debug("Started old container %s", state.original_name)
+                except DockerException as e:
+                    # Start failure might be due to container already running or dead state
+                    LOG.warning("Could not start old container %s after rollback: %s", 
+                               state.original_name, e)
+                    # Don't mark rollback as failed - rename succeeded which is most important
+                
+            except DockerException as e:
+                LOG.error("Critical rollback failed - could not restore %s: %s", 
+                         state.original_name, e)
+                rollback_success = False
+        
+        return rollback_success
+        
+    except Exception as e:
+        LOG.error("Rollback operation failed with unexpected error: %s", e)
+        return False
+
+
+def _attach_to_networks_safely(client: DockerClient, new_id: str, networking: dict, 
+                               original_name: str) -> bool:
+    """Attach container to networks with proper error handling and rollback."""
+    attached_networks = []
+    
+    try:
+        for network_name, network_cfg in networking.items():
+            mac_address = network_cfg.get("MacAddress")
+            ipam_cfg = network_cfg.get("IPAMConfig") or {}
+            links = _normalize_links_value(network_cfg.get("Links"))
+            
+            try:
+                client.api.connect_container_to_network(
+                    new_id, network_name,
+                    aliases=network_cfg.get("Aliases"),
+                    links=links,
+                    ipv4_address=ipam_cfg.get("IPv4Address"),
+                    ipv6_address=ipam_cfg.get("IPv6Address"),
+                    link_local_ips=ipam_cfg.get("LinkLocalIPs"),
+                    driver_opt=network_cfg.get("DriverOpts"),
+                    mac_address=mac_address,
+                )
+                attached_networks.append(network_name)
+                LOG.debug("Attached %s to network %s", original_name, network_name)
+                
+            except APIError as e:
+                LOG.error("Failed to attach %s to network %s: %s", original_name, network_name, e)
+                # Rollback already attached networks
+                for net in attached_networks:
+                    try:
+                        client.api.disconnect_container_from_network(new_id, net)
+                    except DockerException:
+                        pass
+                return False
+                
+        return True
+        
+    except Exception as e:
+        LOG.error("Unexpected error during network attachment: %s", e)
+        # Cleanup any partial attachments
+        for net in attached_networks:
+            try:
+                client.api.disconnect_container_from_network(new_id, net)
+            except DockerException:
+                pass
+        return False
+
+
+def _build_create_kwargs(container: Container, image_ref: str, temp_name: str, client: DockerClient) -> dict:
+    """Build container creation kwargs from existing container."""
     config = container.attrs.get("Config", {})
     host_config = container.attrs.get("HostConfig")
     networking = container.attrs.get("NetworkSettings", {}).get("Networks")
-    name = container.name
-
-    base_name = _strip_guerite_suffix(name)
-
-    exposed_ports = config.get("ExposedPorts")
-    ports = list(exposed_ports.keys()) if isinstance(exposed_ports, dict) else None
-
-    original_name = base_name
-    short_suffix = container.id[:8]
-    temp_old_name = f"{base_name}-guerite-old-{short_suffix}"
-    temp_new_name = f"{base_name}-guerite-new-{short_suffix}"
-
-    mounts = container.attrs.get("Mounts") or []
-    networking = container.attrs.get("NetworkSettings", {}).get("Networks")
-
-    endpoint_map: dict[str, dict] = {}
-    if networking is not None:
+    
+    # Build network endpoint config
+    endpoint_map = {}
+    if networking:
         for network_name, network_cfg in networking.items():
             ipam_cfg = network_cfg.get("IPAMConfig") or {}
             links = _normalize_links_value(network_cfg.get("Links"))
@@ -624,7 +743,8 @@ def restart_container(
             }
             endpoint_kwargs = {key: value for key, value in endpoint_kwargs.items() if value is not None}
             endpoint_map[network_name] = client.api.create_endpoint_config(**endpoint_kwargs)
-
+    
+    # Build create kwargs
     create_kwargs = {
         "command": config.get("Cmd"),
         "domainname": config.get("Domainname"),
@@ -636,9 +756,9 @@ def restart_container(
         "image": image_ref,
         "labels": config.get("Labels"),
         "mac_address": config.get("MacAddress"),
-        "name": temp_new_name,
+        "name": temp_name,
         "network_disabled": config.get("NetworkDisabled"),
-        "ports": ports,
+        "ports": _extract_ports(config),
         "runtime": host_config.get("Runtime") if isinstance(host_config, dict) else None,
         "shell": config.get("Shell"),
         "stdin_open": config.get("OpenStdin"),
@@ -649,116 +769,162 @@ def restart_container(
         "volumes": config.get("Volumes"),
         "working_dir": config.get("WorkingDir"),
     }
-
+    
     if endpoint_map:
         create_kwargs["networking_config"] = client.api.create_networking_config(endpoint_map)
+    
+    return {key: value for key, value in create_kwargs.items() if value is not None}
 
-    create_kwargs = {key: value for key, value in create_kwargs.items() if value is not None}
 
+def _extract_ports(config: dict) -> Optional[list]:
+    """Extract port list from container config."""
+    exposed_ports = config.get("ExposedPorts")
+    return list(exposed_ports.keys()) if isinstance(exposed_ports, dict) else None
+
+
+def restart_container(
+    client: DockerClient,
+    container: Container,
+    image_ref: str,
+    new_image_id: Optional[str],
+    settings: Settings,
+    event_log: list[str],
+    notify: bool,
+) -> bool:
+    """Enhanced container recreation with comprehensive fallback."""
+    state = ContainerRecreateState()
+    
+    # Extract container information safely
+    name = container.name
+    if name is None:
+        LOG.error("Container name is None, cannot proceed with recreation")
+        return False
+    
+    if not container.id:
+        LOG.error("Container ID is missing, cannot proceed with recreation")
+        return False
+    
+    base_name = _strip_guerite_suffix(name)
+    state.original_name = base_name
+    short_suffix = container.id[:8]  # Already validated container.id exists
+    state.temp_old_name = f"{base_name}-guerite-old-{short_suffix}"
+    state.temp_new_name = f"{base_name}-guerite-new-{short_suffix}"
+    
+    # Preflight checks
+    config = container.attrs.get("Config", {})
+    mounts = container.attrs.get("Mounts") or []
+    networking = container.attrs.get("NetworkSettings", {}).get("Networks")
+    
     _preflight_mounts(name, mounts, notify, event_log)
-
-    new_id: Optional[str] = None
-    old_renamed = False
+    
     try:
-        client.api.rename(container.id, temp_old_name)
-        old_renamed = True
+        # Step 1: Rename old container
+        client.api.rename(container.id, state.temp_old_name)
+        state.old_renamed = True
+        LOG.debug("Renamed old container to %s", state.temp_old_name)
+        
+        # Step 2: Create new container
+        create_kwargs = _build_create_kwargs(container, image_ref, state.temp_new_name, client)
         created = client.api.create_container(**create_kwargs)
-        new_id = created.get("Id")
-        LOG.info("Stopping %s", original_name)
-        if notify:
-            event_log.append(f"Stopping container {original_name} ({_image_display_name(image_ref=image_ref)})")
-        container.stop()
-        if new_id is None:
+        state.new_id = created.get("Id")
+        
+        if state.new_id is None:
             raise DockerException("create_container returned no Id")
-        if networking is not None:
-            for network_name, network_cfg in networking.items():
-                mac_address = network_cfg.get("MacAddress")
-                if mac_address:
-                    ipam_cfg = network_cfg.get("IPAMConfig") or {}
-                    links = _normalize_links_value(network_cfg.get("Links"))
-                    try:
-                        client.api.connect_container_to_network(
-                            new_id,
-                            network_name,
-                            aliases=network_cfg.get("Aliases"),
-                            links=links,
-                            ipv4_address=ipam_cfg.get("IPv4Address"),
-                            ipv6_address=ipam_cfg.get("IPv6Address"),
-                            link_local_ips=ipam_cfg.get("LinkLocalIPs"),
-                            driver_opt=network_cfg.get("DriverOpts"),
-                            mac_address=mac_address,
-                        )
-                    except APIError as error:
-                        LOG.error("Failed to attach %s to %s with MAC: %s", original_name, network_name, error)
-                        raise
-        client.api.rename(new_id, original_name)
-        client.api.start(new_id)
-        # Track this container as created by Guerite
-        _GUERITE_CREATED.add(new_id)
-        LOG.info("Restarted %s", original_name)
+        
+        LOG.debug("Created new container %s", state.new_id)
+        
+        # Step 3: Stop old container
+        LOG.info("Stopping %s", state.original_name)
         if notify:
-            event_log.append(f"Creating container {original_name} ({_image_display_name(image_ref=image_ref)})")
-
-        # If the new container has a healthcheck, wait for it to turn healthy before finalizing
-        if config.get("Healthcheck"):
-            healthy, status = _wait_for_healthy(client, new_id, settings.health_backoff_seconds)
-            if not healthy:
-                LOG.warning("New container %s did not become healthy (status=%s); rolling back", original_name, status)
-                try:
-                    client.api.stop(new_id)
-                except DockerException:
-                    LOG.debug("Could not stop new container %s", new_id)
-                try:
-                    try:
-                        client.api.rename(new_id, temp_new_name)
-                    except DockerException:
-                        LOG.debug("Could not rename unhealthy new container %s; will remove after rollback", new_id)
-                    client.api.rename(temp_old_name, original_name)
-                    client.api.start(container.id)
-                except DockerException as rollback_error:
-                    LOG.warning("Rollback after failed health for %s failed: %s", original_name, rollback_error)
-                    if notify:
-                        event_log.append(f"Failed health rollback for {original_name}: {rollback_error}")
-                    _register_restart_failure(container.id, original_name, notify, event_log, settings, rollback_error)
-                    return False
-                try:
-                    client.api.remove_container(new_id, force=True)
-                except DockerException:
-                    LOG.debug("Could not remove unhealthy new container %s", new_id)
-                if notify:
-                    event_log.append(f"Rolled back {original_name}; new container never became healthy")
-                _register_restart_failure(
-                    container.id,
-                    original_name,
-                    notify,
-                    event_log,
-                    settings,
-                    RuntimeError(f"new container unhealthy after recreate (status={status})"),
+            event_log.append(f"Stopping container {state.original_name} ({_image_display_name(image_ref=image_ref)})")
+        
+        try:
+            container.stop()
+            state.old_stopped = True
+        except DockerException as e:
+            LOG.warning("Failed to stop old container %s: %s (continuing anyway)", state.original_name, e)
+            # Continue even if stop fails - Docker may still be able to work with it
+        
+        # Step 4: Attach to networks with MAC addresses
+        # Containers are created with networking_config, but networks with MAC addresses
+        # need to be re-attached to apply the MAC address correctly
+        if networking:
+            networks_with_mac = {
+                name: cfg for name, cfg in networking.items() if cfg.get("MacAddress")
+            }
+            if networks_with_mac:
+                success = _attach_to_networks_safely(
+                    client, state.new_id, networks_with_mac, state.original_name
                 )
-                return False
-
+                if not success:
+                    raise DockerException("Failed to attach to networks with MAC addresses")
+        
+        # Step 5: Start new container, then verify health before giving it production name
+        # Start FIRST so if it fails, we can safely remove container with temp name
+        client.api.start(state.new_id)
+        LOG.debug("Started new container %s", state.temp_new_name)
+        
+        # Step 6: Health check verification BEFORE final rename
+        # This way if health check fails, container still has temp name and rollback is simpler
+        if config.get("Healthcheck"):
+            # Use a dedicated timeout for health check (separate from backoff delay)
+            health_check_timeout = settings.health_check_timeout_seconds
+            healthy, status = _wait_for_healthy(client, state.new_id, health_check_timeout)
+            if not healthy:
+                LOG.warning("New container %s did not become healthy (status=%s) after %ds; rolling back", 
+                           state.temp_new_name, status, health_check_timeout)
+                raise RuntimeError(f"new container unhealthy after recreate (status={status})")
+        
+        # Step 7: Now that it's running and healthy, give it the production name
+        client.api.rename(state.new_id, state.original_name)
+        state.new_renamed_to_production = True
+        _GUERITE_CREATED.add(state.new_id)
+        
+        LOG.info("Started new container %s", state.original_name)
+        if notify:
+            event_log.append(f"Created container {state.original_name} ({_image_display_name(image_ref=image_ref)})")
+        
+        # Step 8: Cleanup old container
         try:
             container.remove()
-        except DockerException:
-            LOG.debug("Could not remove old container %s", temp_old_name)
-        # Reset failure counters on success
-        _RESTART_FAIL_COUNT.pop(container.id, None)
-        _RESTART_BACKOFF.pop(container.id, None)
+            LOG.debug("Removed old container %s", state.temp_old_name)
+        except DockerException as e:
+            LOG.warning("Could not remove old container %s: %s (will be cleaned up by stale rollback cleanup)", 
+                       state.temp_old_name, e)
+        
+        # Step 9: Reset failure counters on success
+        if container.id:
+            _RESTART_FAIL_COUNT.pop(container.id, None)
+            _RESTART_BACKOFF.pop(container.id, None)
+        
         return True
-    except (APIError, DockerException, TypeError) as error:
-        LOG.error("Failed to restart %s during recreate: %s", original_name, error)
-        try:
-            if old_renamed:
-                client.api.rename(container.id, original_name)
-            container.start()
-        except DockerException as rollback_error:
-            LOG.warning("Rollback failed for %s: %s", original_name, rollback_error)
-        if new_id is not None:
-            try:
-                client.api.remove_container(new_id, force=True)
-            except DockerException:
-                LOG.debug("Cleanup failed for new container %s", new_id)
-        _register_restart_failure(container.id, original_name, notify, event_log, settings, error)
+        
+    except (APIError, DockerException, RuntimeError, TypeError) as error:
+        LOG.error("Failed to restart %s during recreate: %s", state.original_name, error)
+        
+        # Comprehensive rollback
+        rollback_success = _rollback_container_recreation(client, state, container)
+        
+        if rollback_success:
+            if notify:
+                rollback_detail = (
+                    "new container never became healthy"
+                    if isinstance(error, RuntimeError) and "unhealthy after recreate" in str(error)
+                    else f"recreate failed: {error}"
+                )
+                event_log.append(f"Rolled back {state.original_name}; {rollback_detail}")
+        else:
+            # Provide specific details about what state the containers are in
+            state_detail = f"old={state.temp_old_name if state.old_renamed else 'original'}, new={_short_id(state.new_id) if state.new_id else 'none'}"
+            LOG.critical("Rollback failed for %s (%s) - manual intervention may be required", 
+                        state.original_name, state_detail)
+            if notify:
+                event_log.append(f"CRITICAL: Rollback failed for {state.original_name} ({state_detail}) - check container state manually")
+        
+        # Register failure for backoff
+        if container.id:
+            _register_restart_failure(container.id, state.original_name, notify, event_log, settings, error)
+        
         return False
 
 

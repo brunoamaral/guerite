@@ -153,6 +153,7 @@ def settings() -> Settings:
         recreate_label="guerite.recreate",
         health_label="guerite.health_check",
         health_backoff_seconds=30,
+        health_check_timeout_seconds=60,
         notifications={"update"},
         timezone="UTC",
         pushover_token=None,
