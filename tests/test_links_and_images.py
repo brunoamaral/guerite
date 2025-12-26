@@ -173,6 +173,7 @@ class TestGueriteCreatedTracking:
     def test_track_new_containers_detects_external_containers(self):
         # Reset state
         monitor._KNOWN_CONTAINERS.clear()
+        monitor._KNOWN_CONTAINER_NAMES.clear()
         monitor._KNOWN_INITIALIZED = False
         monitor._PENDING_DETECTS.clear()
         monitor._GUERITE_CREATED.clear()
@@ -188,3 +189,29 @@ class TestGueriteCreatedTracking:
         # Should be detected
         assert len(monitor._PENDING_DETECTS) == 1
         assert monitor._PENDING_DETECTS[0] == "app2"
+
+    def test_track_new_containers_ignores_external_restarts(self):
+        """Containers restarted externally (new ID, same name) should not trigger notifications."""
+        # Reset state
+        monitor._KNOWN_CONTAINERS.clear()
+        monitor._KNOWN_CONTAINER_NAMES.clear()
+        monitor._KNOWN_INITIALIZED = False
+        monitor._PENDING_DETECTS.clear()
+        monitor._GUERITE_CREATED.clear()
+
+        # Initialize with one container
+        container1 = DummyContainer("app1")
+        original_id = container1.id
+        monitor._track_new_containers([container1])
+        assert "app1" in monitor._KNOWN_CONTAINER_NAMES
+        assert original_id in monitor._KNOWN_CONTAINERS
+
+        # Container restarted externally - same name, different ID
+        container1_restarted = DummyContainer("app1")
+        container1_restarted.id = "app1-id-new"
+        monitor._track_new_containers([container1_restarted])
+        
+        # Should NOT be detected as new
+        assert len(monitor._PENDING_DETECTS) == 0
+        assert "app1" in monitor._KNOWN_CONTAINER_NAMES
+        assert container1_restarted.id in monitor._KNOWN_CONTAINERS

@@ -28,6 +28,7 @@ _HEALTH_BACKOFF_LOADED = False
 _NO_HEALTH_WARNED: set[str] = set()
 _PRUNE_CRON_INVALID = False
 _KNOWN_CONTAINERS: set[str] = set()
+_KNOWN_CONTAINER_NAMES: set[str] = set()
 _KNOWN_INITIALIZED = False
 _PENDING_DETECTS: list[str] = []
 _LAST_DETECT_NOTIFY: Optional[datetime] = None
@@ -488,16 +489,24 @@ def _track_new_containers(containers: list[Container]) -> None:
     if not _KNOWN_INITIALIZED:
         for container in containers:
             _KNOWN_CONTAINERS.add(container.id)
+            _KNOWN_CONTAINER_NAMES.add(container.name)
         _KNOWN_INITIALIZED = True
         return
     for container in containers:
         if container.id not in _KNOWN_CONTAINERS:
             _KNOWN_CONTAINERS.add(container.id)
-            # Don't notify about containers we created
-            if container.id not in _GUERITE_CREATED:
-                _PENDING_DETECTS.append(container.name)
+            # Only notify if it's a truly new container name (not just a restart)
+            if container.name not in _KNOWN_CONTAINER_NAMES:
+                _KNOWN_CONTAINER_NAMES.add(container.name)
+                # Don't notify about containers we created
+                if container.id not in _GUERITE_CREATED:
+                    _PENDING_DETECTS.append(container.name)
+                else:
+                    _GUERITE_CREATED.discard(container.id)
             else:
-                _GUERITE_CREATED.discard(container.id)
+                # Existing container restarted externally - just update tracking
+                if container.id in _GUERITE_CREATED:
+                    _GUERITE_CREATED.discard(container.id)
 
 
 def _short_id(identifier: Optional[str]) -> str:
