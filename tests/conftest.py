@@ -9,8 +9,9 @@ from guerite.config import Settings
 
 
 class DummyImage:
-    def __init__(self, image_id: str = "old"):
+    def __init__(self, image_id: str = "old", tags: Optional[list[str]] = None):
         self.id = image_id
+        self.tags = tags if tags is not None else ["repo:tag"]
 
 
 class DummyContainer:

@@ -268,9 +268,9 @@ def test_restart_container_network_priority_fallback(monkeypatch, restart_settin
         event_log=event_log,
         notify=False,
     ) is True
-    # Ensure priority was stripped and links normalized
+    # Ensure priority was stripped and links normalized to dict format
     assert "priority" not in client.api.endpoint_kwargs
-    assert client.api.endpoint_kwargs.get("links") == ["svc:alias"]
+    assert client.api.endpoint_kwargs.get("links") == {"svc": "alias"}
 
 
 def test_restart_container_connect_failure(monkeypatch, restart_settings: Settings):

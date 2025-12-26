@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import pytest
 
@@ -23,8 +24,9 @@ class DummyContainer:
 
 
 class DummyImage:
-    def __init__(self, image_id: str):
+    def __init__(self, image_id: str, tags: Optional[list[str]] = None):
         self.id = image_id
+        self.tags = tags if tags is not None else ["repo:tag"]
 
 
 class DummyClient:
