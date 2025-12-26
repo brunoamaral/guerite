@@ -181,6 +181,26 @@ def current_image_id(container: Container) -> Optional[str]:
         return None
 
 
+def get_image_reference(container: Container) -> Optional[str]:
+    """Get the best image reference for recreating a container.
+    
+    Prefers image tags over hashes so docker ps shows readable names.
+    """
+    try:
+        # Try to get a tag from the image object
+        if container.image.tags:
+            return container.image.tags[0]
+    except (DockerException, AttributeError):
+        pass
+    
+    # Fall back to Config.Image, but only if it's not a hash
+    config_image = container.attrs.get("Config", {}).get("Image")
+    if config_image and not config_image.startswith("sha256:"):
+        return config_image
+    
+    return None
+
+
 def _cron_matches(container: Container, label_key: str, timestamp: datetime) -> bool:
     cron_expression = container.labels.get(label_key)
     if cron_expression is None:
@@ -486,6 +506,24 @@ def _short_id(identifier: Optional[str]) -> str:
     return identifier.split(":")[-1][:12]
 
 
+def _image_display_name(container: Optional[Container] = None, image_ref: Optional[str] = None, image_id: Optional[str] = None) -> str:
+    """Get a human-readable image name, preferring tags over IDs."""
+    if image_ref:
+        return image_ref
+    if container is not None:
+        try:
+            config_image = container.attrs.get("Config", {}).get("Image")
+            if config_image and not config_image.startswith("sha256:"):
+                return config_image
+            if container.image.tags:
+                return container.image.tags[0]
+        except (DockerException, AttributeError):
+            pass
+    if image_id:
+        return _short_id(image_id)
+    return "unknown"
+
+
 def _normalize_links_value(raw_links: Optional[Any]) -> Optional[dict[str, str]]:
     if raw_links in (None, False):
         return None
@@ -619,7 +657,7 @@ def restart_container(
         new_id = created.get("Id")
         LOG.info("Stopping %s", original_name)
         if notify:
-            event_log.append(f"Stopping container {original_name} ({_short_id(container.image.id)})")
+            event_log.append(f"Stopping container {original_name} ({_image_display_name(image_ref=image_ref)})")
         container.stop()
         if new_id is None:
             raise DockerException("create_container returned no Id")
@@ -650,7 +688,7 @@ def restart_container(
         _GUERITE_CREATED.add(new_id)
         LOG.info("Restarted %s", original_name)
         if notify:
-            event_log.append(f"Creating container {original_name} ({_short_id(new_image_id)})")
+            event_log.append(f"Creating container {original_name} ({_image_display_name(image_ref=image_ref)})")
 
         # If the new container has a healthcheck, wait for it to turn healthy before finalizing
         if config.get("Healthcheck"):
@@ -889,7 +927,7 @@ def run_once(
             LOG.debug("Skipping %s; no actions scheduled now", container.name)
             continue
 
-        image_ref = container.attrs.get("Config", {}).get("Image")
+        image_ref = get_image_reference(container)
         if image_ref is None:
             LOG.warning("Skipping %s; missing image reference", container.name)
             continue
@@ -904,7 +942,7 @@ def run_once(
                 _mark_action(base_name, current_time)
                 if notify_update:
                     event_log.append(
-                        f"Found new {image_ref} image ({_short_id(pulled_image.id)})"
+                        f"Found new {image_ref} image"
                     )
                 if settings.dry_run:
                     LOG.info("Dry-run enabled; not restarting %s", container.name)
@@ -954,7 +992,7 @@ def run_once(
                 image_id = current_image_id(container)
                 if notify_recreate:
                     event_log.append(
-                        f"Recreating {container.name} (scheduled recreate) ({_short_id(image_id)})"
+                        f"Recreating {container.name} (scheduled recreate) ({_image_display_name(image_ref=image_ref)})"
                     )
                 if restart_container(
                     client,
@@ -985,7 +1023,7 @@ def run_once(
                 container.restart()
                 if notify_restart:
                     event_log.append(
-                        f"Restarted {container.name} (scheduled restart) ({_short_id(image_id)})"
+                        f"Restarted {container.name} (scheduled restart) ({_image_display_name(image_ref=image_ref)})"
                     )
             except DockerException as error:
                 LOG.error("Failed to restart %s: %s", container.name, error)
@@ -1027,7 +1065,7 @@ def run_once(
                 _save_health_backoff(settings.state_file)
                 if _should_notify(settings, "health") or _should_notify(settings, "health_check"):
                     event_log.append(
-                        f"Restarted {container.name} after failed health check ({_short_id(new_image_id)})"
+                        f"Restarted {container.name} after failed health check ({_image_display_name(image_ref=image_ref)})"
                     )
             elif notify_event:
                 event_log.append(f"Failed to restart {container.name}")
