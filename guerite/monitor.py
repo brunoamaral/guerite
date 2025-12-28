@@ -17,6 +17,7 @@ from docker import DockerClient
 from docker.errors import APIError, DockerException
 from docker.models.containers import Container
 from docker.models.images import Image
+from requests.exceptions import ReadTimeout, RequestException
 
 from .config import Settings
 from .notifier import notify_pushover
@@ -1135,7 +1136,24 @@ def prune_images(
             )
         return
     try:
-        result = client.api.prune_images(filters={"dangling": False})
+        had_timeout_attr = hasattr(client.api, "timeout")
+        previous_timeout: Any = getattr(client.api, "timeout", None)
+
+        if settings.prune_timeout_seconds is not None and settings.prune_timeout_seconds > 0:
+            client.api.timeout = settings.prune_timeout_seconds
+        elif isinstance(previous_timeout, (int, float)) and previous_timeout > 0:
+            client.api.timeout = previous_timeout * 3
+        else:
+            client.api.timeout = 180
+
+        try:
+            result = client.api.prune_images(filters={"dangling": False})
+        finally:
+            if had_timeout_attr:
+                client.api.timeout = previous_timeout
+            else:
+                if hasattr(client.api, "timeout"):
+                    delattr(client.api, "timeout")
         reclaimed = result.get("SpaceReclaimed") if isinstance(result, dict) else None
         images_deleted = (
             result.get("ImagesDeleted") if isinstance(result, dict) else None
@@ -1172,6 +1190,10 @@ def prune_images(
         LOG.warning("Image prune failed: %s", error)
         if notify:
             event_log.append(f"Image prune failed: {error}")
+    except (ReadTimeout, RequestException) as error:
+        LOG.warning("Image prune timed out or connection failed: %s", error)
+        if notify:
+            event_log.append(f"Image prune timed out: {error}")
 
 
 def _flush_detect_notifications(

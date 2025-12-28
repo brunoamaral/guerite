@@ -15,6 +15,7 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TZ = "UTC"
 DEFAULT_STATE_FILE = "/tmp/guerite_state.json"
 DEFAULT_PRUNE_CRON: str | None = None
+DEFAULT_PRUNE_TIMEOUT_SECONDS: int | None = 180
 DEFAULT_WEBHOOK_URL: str | None = None
 DEFAULT_ROLLBACK_GRACE_SECONDS = 3600
 DEFAULT_RESTART_RETRY_LIMIT = 3
@@ -43,6 +44,7 @@ class Settings:
     health_label: str
     health_backoff_seconds: int
     health_check_timeout_seconds: int
+    prune_timeout_seconds: Optional[int]
     notifications: Set[str]
     timezone: str
     pushover_token: Optional[str]
@@ -73,6 +75,10 @@ def load_settings() -> Settings:
         health_check_timeout_seconds=_env_int(
             "GUERITE_HEALTH_CHECK_TIMEOUT_SECONDS",
             DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS,
+        ),
+        prune_timeout_seconds=_env_int_optional(
+            "GUERITE_PRUNE_TIMEOUT_SECONDS",
+            DEFAULT_PRUNE_TIMEOUT_SECONDS,
         ),
         notifications=_env_csv_set("GUERITE_NOTIFICATIONS", DEFAULT_NOTIFICATIONS),
         timezone=getenv("GUERITE_TZ", DEFAULT_TZ),
@@ -116,6 +122,17 @@ def _env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _env_int_optional(name: str, default: Optional[int]) -> Optional[int]:
+    value = getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _env_csv_set(name: str, default: str) -> Set[str]:

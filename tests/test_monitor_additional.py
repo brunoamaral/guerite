@@ -71,6 +71,7 @@ def settings(tmp_path) -> Settings:
         health_label="guerite.health_check",
         health_backoff_seconds=30,
         health_check_timeout_seconds=60,
+        prune_timeout_seconds=None,
         notifications={"update", "detect", "prune"},
         timezone="UTC",
         pushover_token=None,
