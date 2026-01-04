@@ -4,10 +4,14 @@ FULL_IMAGE := $(IMAGE):$(TAG)
 
 PYTHON ?= python
 
-.PHONY: help lint test build dual-tag tag-ghcr
+.PHONY: help deps lint test build dual-tag tag-ghcr
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "\nTargets:\n"} /^[a-zA-Z0-9][a-zA-Z0-9_-]*:.*##/ {printf "  %-16s %s\n", $$1, $$2} END {printf "\n"}' $(MAKEFILE_LIST)
+
+deps: ## Install runtime and dev dependencies
+	$(PYTHON) -m pip install -U pip
+	$(PYTHON) -m pip install -e '.[dev]'
 
 lint: ## Run ruff lints
 	$(PYTHON) -m ruff check .

@@ -165,6 +165,36 @@ def test_prune_skips_when_rollback_protected(monkeypatch, settings: Settings, tm
     assert not event_log or "Skipping prune" in event_log[0]
 
 
+def test_prune_images_handles_timeout_without_sleep(monkeypatch, settings: Settings):
+    # Ensure prune timeouts never crash the run loop and don't slow tests.
+    from requests.exceptions import ReadTimeout
+
+    client = DummyClient()
+    client.api.prune_images = lambda **_kwargs: (_ for _ in ()).throw(ReadTimeout("timed out"))
+    client.containers.list = lambda all=True: []
+
+    event_log: list[str] = []
+    monitor.prune_images(client, settings, event_log, notify=True)
+
+    assert any("timed out" in entry.lower() for entry in event_log)
+
+
+def test_prune_images_handles_urllib3_timeout_without_sleep(monkeypatch, settings: Settings):
+    # Some environments surface Docker socket timeouts as urllib3.exceptions.ReadTimeoutError.
+    from urllib3.exceptions import ReadTimeoutError
+
+    client = DummyClient()
+    client.api.prune_images = lambda **_kwargs: (_ for _ in ()).throw(
+        ReadTimeoutError(None, None, "timed out")
+    )
+    client.containers.list = lambda all=True: []
+
+    event_log: list[str] = []
+    monitor.prune_images(client, settings, event_log, notify=True)
+
+    assert any("timed out" in entry.lower() for entry in event_log)
+
+
 def test_started_recently_grace_period():
     container = DummyContainer("app")
     now = datetime.now(timezone.utc)
