@@ -4,9 +4,11 @@ from json import dumps
 from logging import getLogger
 from urllib.parse import urlencode, urlsplit
 
-from .config import Settings
+from .config import DEFAULT_NOTIFICATION_TIMEOUT_SECONDS, Settings
 
 LOG = getLogger(__name__)
+
+_NOTIFICATION_TIMEOUT = DEFAULT_NOTIFICATION_TIMEOUT_SECONDS
 
 
 def notify_pushover(settings: Settings, title: str, message: str) -> None:
@@ -15,7 +17,7 @@ def notify_pushover(settings: Settings, title: str, message: str) -> None:
         return
 
     endpoint = urlsplit(settings.pushover_api)
-    connection = HTTPSConnection(endpoint.netloc)
+    connection = HTTPSConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
     body = urlencode(
         {
             "token": settings.pushover_token,
@@ -48,9 +50,9 @@ def notify_webhook(settings: Settings, title: str, message: str) -> None:
 
     endpoint = urlsplit(settings.webhook_url)
     if endpoint.scheme == "https":
-        connection = HTTPSConnection(endpoint.netloc)
+        connection = HTTPSConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
     else:
-        connection = HTTPConnection(endpoint.netloc)
+        connection = HTTPConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
 
     body = dumps({"title": title, "message": message}).encode("utf-8")
     path = endpoint.path or "/"

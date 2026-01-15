@@ -6,11 +6,14 @@ from json import JSONDecodeError
 from json import dump
 from json import load
 from logging import getLogger
+from inspect import signature
 from os.path import exists
 from socket import gethostname
 from typing import Any, Optional
 from time import sleep
 from dataclasses import dataclass
+
+from time import time as time_time
 
 from croniter import croniter
 from docker import DockerClient
@@ -18,6 +21,10 @@ from docker.errors import APIError, DockerException
 from docker.models.containers import Container
 from docker.models.images import Image
 from requests.exceptions import ReadTimeout, RequestException
+try:
+    from urllib3.exceptions import ReadTimeoutError
+except ImportError:  # pragma: no cover
+    ReadTimeoutError = None
 
 from .config import Settings
 from .notifier import notify_pushover
@@ -32,6 +39,7 @@ _PRUNE_CRON_INVALID = False
 _KNOWN_CONTAINERS: set[str] = set()
 _KNOWN_CONTAINER_NAMES: set[str] = set()
 _KNOWN_INITIALIZED = False
+_KNOWN_CONTAINERS_LOADED = False
 _PENDING_DETECTS: list[str] = []
 _LAST_DETECT_NOTIFY: Optional[datetime] = None
 _GUERITE_CREATED: set[str] = set()
@@ -52,6 +60,16 @@ class ContainerRecreateState:
     original_name: Optional[str] = None
     temp_old_name: Optional[str] = None
     temp_new_name: Optional[str] = None
+
+
+@dataclass
+class UpgradeState:
+    """Tracks upgrade state for recovery purposes."""
+
+    original_image_id: Optional[str] = None
+    target_image_id: Optional[str] = None
+    started_at: Optional[datetime] = None
+    status: str = "unknown"  # in-progress, completed, failed
 
 
 def _compose_project(container: Container) -> Optional[str]:
@@ -135,6 +153,9 @@ def _ensure_health_backoff_loaded(state_file: str) -> None:
     global _HEALTH_BACKOFF_LOADED
     if _HEALTH_BACKOFF_LOADED:
         return
+    if not isinstance(state_file, str):
+        _HEALTH_BACKOFF_LOADED = True
+        return
     try:
         with open(state_file, "r", encoding="utf-8") as handle:
             data = load(handle)
@@ -163,6 +184,52 @@ def _save_health_backoff(state_file: str) -> None:
         LOG.debug("Failed to persist health backoff state to %s: %s", state_file, error)
 
 
+def _ensure_known_containers_loaded(state_file: str) -> None:
+    """Load known containers from disk on startup to avoid spurious detect notifications."""
+    global _KNOWN_CONTAINERS_LOADED, _KNOWN_INITIALIZED
+    if _KNOWN_CONTAINERS_LOADED:
+        return
+    if not isinstance(state_file, str):
+        _KNOWN_CONTAINERS_LOADED = True
+        return
+
+    known_state_file = state_file.replace(".json", "_known.json")
+    try:
+        with open(known_state_file, "r", encoding="utf-8") as handle:
+            data = load(handle)
+        if isinstance(data, dict):
+            ids = data.get("container_ids", [])
+            names = data.get("container_names", [])
+            if isinstance(ids, list):
+                _KNOWN_CONTAINERS.update(ids)
+            if isinstance(names, list):
+                _KNOWN_CONTAINER_NAMES.update(names)
+            # Mark as initialized since we restored from disk
+            if _KNOWN_CONTAINERS or _KNOWN_CONTAINER_NAMES:
+                _KNOWN_INITIALIZED = True
+    except FileNotFoundError:
+        pass
+    except (OSError, JSONDecodeError) as error:
+        LOG.debug("Failed to load known containers state: %s", error)
+    _KNOWN_CONTAINERS_LOADED = True
+
+
+def _save_known_containers(state_file: str) -> None:
+    """Save known containers to disk for crash recovery."""
+    if not isinstance(state_file, str):
+        return
+    known_state_file = state_file.replace(".json", "_known.json")
+    serializable = {
+        "container_ids": list(_KNOWN_CONTAINERS),
+        "container_names": list(_KNOWN_CONTAINER_NAMES),
+    }
+    try:
+        with open(known_state_file, "w", encoding="utf-8") as handle:
+            dump(serializable, handle)
+    except OSError as error:
+        LOG.debug("Failed to save known containers state: %s", error)
+
+
 def select_monitored_containers(
     client: DockerClient, settings: Settings
 ) -> list[Container]:
@@ -178,8 +245,14 @@ def select_monitored_containers(
             continue
         try:
             for container in client.containers.list(filters={"label": label}):
+                try:
+                    labels_dict = container.labels or {}
+                except DockerException:
+                    continue
+                if label not in labels_dict:
+                    continue
                 seen[container.id] = container
-        except DockerException as error:
+        except Exception as error:
             LOG.error("Failed to list containers with label %s: %s", label, error)
     return list(seen.values())
 
@@ -187,9 +260,22 @@ def select_monitored_containers(
 def pull_image(client: DockerClient, image_ref: str) -> Optional[Image]:
     try:
         return client.images.pull(image_ref)
-    except DockerException as error:
+    except (DockerException, ReadTimeout, RequestException) as error:
         LOG.error("Failed to pull image %s: %s", image_ref, error)
         return None
+    except Exception as error:
+        if ReadTimeoutError is not None and isinstance(error, ReadTimeoutError):
+            LOG.error("Failed to pull image %s: %s", image_ref, error)
+            return None
+        raise
+
+
+def _supports_is_upgrade(func: Any) -> bool:
+    try:
+        params = signature(func).parameters
+        return "is_upgrade" in params
+    except Exception:
+        return False
 
 
 def needs_update(container: Container, pulled_image: Image) -> bool:
@@ -516,11 +602,17 @@ def _cleanup_stale_rollbacks(
 
 
 def _should_notify(settings: Settings, event: str) -> bool:
-    return event in settings.notifications
+    try:
+        notifications = getattr(settings, "notifications", None)
+        if notifications is None:
+            return False
+        return event in notifications
+    except Exception:
+        return False
 
 
 def _clean_cron_expression(value: Optional[str]) -> Optional[str]:
-    if value is None:
+    if value is None or not isinstance(value, str):
         return None
     cleaned = value.strip()
     if cleaned.startswith("[") and cleaned.endswith("]"):
@@ -660,6 +752,375 @@ def _strip_guerite_suffix(name: str) -> str:
         if match is None:
             return current
         current = match.group(1)
+
+
+def _parse_recovery_info_from_name(name: str) -> Optional[dict[str, Any]]:
+    """Parse recovery info from a container name.
+
+    Supports formats:
+    - <base>-guerite-(old|new)-<suffix>
+    - <base>-guerite-(old|new)-<suffix>-<timestamp>-<fail_count>
+    where suffix is any non-empty string without dashes (commonly 8-hex chars),
+    timestamp and fail_count are integers.
+    """
+
+    # Extended format with timestamp and fail_count
+    extended_pattern = re_compile(
+        r"^(?P<base>.+)-guerite-(?P<kind>old|new)-(?P<suffix>[^-]+)-(?P<ts>\d+)-(?P<count>\d+)$"
+    )
+    match = extended_pattern.match(name)
+    if match:
+        try:
+            return {
+                "base_name": match.group("base"),
+                "recovery_type": match.group("kind"),
+                "suffix": match.group("suffix"),
+                "timestamp": int(match.group("ts")),
+                "fail_count": int(match.group("count")),
+            }
+        except ValueError:
+            return None
+
+    # Simple format without timestamp/fail_count
+    simple_pattern = re_compile(
+        r"^(?P<base>.+)-guerite-(?P<kind>old|new)-(?P<suffix>[^-]+)$"
+    )
+    match = simple_pattern.match(name)
+    if match:
+        return {
+            "base_name": match.group("base"),
+            "recovery_type": match.group("kind"),
+            "suffix": match.group("suffix"),
+            "timestamp": None,
+            "fail_count": None,
+        }
+
+    return None
+
+
+def _generate_recovery_name(
+    base_name: str,
+    recovery_type: str,
+    suffix: str,
+    fail_count: int,
+    timestamp: Optional[int] = None,
+) -> str:
+    """Generate a recovery name compatible with parser."""
+    ts = int(timestamp if timestamp is not None else time_time())
+    return f"{base_name}-guerite-{recovery_type}-{suffix}-{ts}-{fail_count}"
+
+
+def _add_upgrade_labels(
+    client: DockerClient, container: Container, upgrade_state: UpgradeState
+) -> bool:
+    """Add upgrade tracking labels to a container."""
+    if not container.id:
+        return False
+    try:
+        labels = container.labels.copy() if container.labels else {}
+
+        # Add upgrade tracking labels
+        labels["guerite.upgrade.status"] = upgrade_state.status
+        if upgrade_state.original_image_id:
+            labels["guerite.upgrade.original-image"] = upgrade_state.original_image_id
+        if upgrade_state.target_image_id:
+            labels["guerite.upgrade.target-image"] = upgrade_state.target_image_id
+        if upgrade_state.started_at:
+            labels["guerite.upgrade.started"] = upgrade_state.started_at.isoformat()
+
+        # Use the correct Docker API method to update labels
+        client.api.inspect_container(container.id)  # Verify container exists
+        # Note: Docker Python SDK doesn't directly support label updates,
+        # so we'll track this in our state management instead
+        LOG.debug("Upgrade labels prepared for container %s", _short_id(container.id))
+        return True
+    except (APIError, DockerException) as error:
+        LOG.warning(
+            "Failed to prepare upgrade labels for %s: %s",
+            _short_id(container.id),
+            error,
+        )
+        return False
+
+
+# Global upgrade state tracking since Docker doesn't support direct label updates
+_UPGRADE_STATE: dict[str, UpgradeState] = {}
+_UPGRADE_STATE_LOADED = False
+_UPGRADE_STATE_FILE: Optional[str] = None
+_UPGRADE_STATE_NOTIFIED: set[str] = set()
+
+
+def _track_upgrade_state(
+    container_id: str,
+    upgrade_state: UpgradeState,
+    persist: bool = True,
+    state_file: Optional[str] = None,
+) -> None:
+    """Track upgrade state and optionally persist to disk.
+
+    If state_file is provided, it is used immediately and cached as _UPGRADE_STATE_FILE.
+    """
+    if not container_id:
+        return
+    _UPGRADE_STATE[container_id] = upgrade_state
+    # Cache provided state_file for future saves
+    global _UPGRADE_STATE_FILE
+    if state_file:
+        _UPGRADE_STATE_FILE = state_file
+    if persist:
+        target = _UPGRADE_STATE_FILE or state_file
+        if target:
+            _save_upgrade_state(target)
+
+
+def _get_tracked_upgrade_state(container_id: str) -> Optional[UpgradeState]:
+    """Get tracked upgrade state for a container."""
+    return _UPGRADE_STATE.get(container_id)
+
+
+def _clear_tracked_upgrade_state(container_id: str) -> None:
+    """Clear tracked upgrade state for a container."""
+    _UPGRADE_STATE.pop(container_id, None)
+
+
+def _ensure_upgrade_state_loaded(state_file: str) -> None:
+    """Load upgrade state from disk on startup."""
+    global _UPGRADE_STATE_LOADED, _UPGRADE_STATE_FILE
+    if _UPGRADE_STATE_LOADED:
+        return
+
+    if not isinstance(state_file, str):
+        _UPGRADE_STATE_LOADED = True
+        return
+
+    _UPGRADE_STATE_FILE = state_file
+
+    # Use same state file as health backoff with upgrade data prefix
+    upgrade_state_file = state_file.replace(".json", "_upgrade.json")
+
+    try:
+        with open(upgrade_state_file, "r", encoding="utf-8") as handle:
+            data = load(handle)
+        if isinstance(data, dict):
+            for container_id, state_data in data.items():
+                try:
+                    if isinstance(state_data, dict):
+                        upgrade_state = UpgradeState(
+                            original_image_id=state_data.get("original_image_id"),
+                            target_image_id=state_data.get("target_image_id"),
+                            status=state_data.get("status", "unknown"),
+                            started_at=datetime.fromisoformat(state_data["started_at"])
+                            if state_data.get("started_at")
+                            else None,
+                        )
+                        _UPGRADE_STATE[container_id] = upgrade_state
+                except (ValueError, TypeError) as e:
+                    LOG.debug(
+                        "Failed to parse upgrade state for %s: %s", container_id, e
+                    )
+                    continue
+    except FileNotFoundError:
+        pass
+    except (OSError, JSONDecodeError) as error:
+        LOG.debug("Failed to load upgrade state: %s", error)
+
+    _UPGRADE_STATE_LOADED = True
+
+
+def _save_upgrade_state(state_file: str) -> None:
+    """Save upgrade state to disk for crash recovery."""
+    if not isinstance(state_file, str):
+        return
+    # Use same state file as health backoff with upgrade data prefix
+    upgrade_state_file = state_file.replace(".json", "_upgrade.json")
+
+    serializable = {}
+    for container_id, upgrade_state in _UPGRADE_STATE.items():
+        state_dict = {"status": upgrade_state.status}
+        if upgrade_state.original_image_id:
+            state_dict["original_image_id"] = upgrade_state.original_image_id
+        if upgrade_state.target_image_id:
+            state_dict["target_image_id"] = upgrade_state.target_image_id
+        if upgrade_state.started_at:
+            state_dict["started_at"] = upgrade_state.started_at.isoformat()
+
+        serializable[container_id] = state_dict
+
+    try:
+        with open(upgrade_state_file, "w", encoding="utf-8") as handle:
+            dump(serializable, handle)
+        LOG.debug("Saved upgrade state for %d containers", len(_UPGRADE_STATE))
+    except OSError as error:
+        LOG.debug("Failed to save upgrade state: %s", error)
+
+
+def _clear_upgrade_labels(client: DockerClient, container_id: str) -> bool:
+    """Clear all upgrade-related labels from a container."""
+    try:
+        container = client.containers.get(container_id)
+        labels = container.labels.copy() if container.labels else {}
+
+        # Remove upgrade labels
+        upgrade_labels = [
+            key for key in labels.keys() if key.startswith("guerite.upgrade.")
+        ]
+        for label in upgrade_labels:
+            labels.pop(label, None)
+
+        client.api.update_container(container_id, labels=labels)
+        LOG.debug("Cleared upgrade labels from container %s", _short_id(container_id))
+        return True
+    except (APIError, DockerException) as error:
+        LOG.warning(
+            "Failed to clear upgrade labels from %s: %s", _short_id(container_id), error
+        )
+        return False
+
+
+def _get_upgrade_state(container: Container) -> Optional[UpgradeState]:
+    """Extract upgrade state from container labels."""
+    if not container.labels:
+        return None
+
+    status = container.labels.get("guerite.upgrade.status")
+    if not status:
+        return None
+
+    upgrade_state = UpgradeState(status=status)
+
+    original_image = container.labels.get("guerite.upgrade.original-image")
+    if original_image:
+        upgrade_state.original_image_id = original_image
+
+    target_image = container.labels.get("guerite.upgrade.target-image")
+    if target_image:
+        upgrade_state.target_image_id = target_image
+
+    started_str = container.labels.get("guerite.upgrade.started")
+    if started_str:
+        try:
+            upgrade_state.started_at = datetime.fromisoformat(
+                started_str.replace("Z", "+00:00")
+            )
+        except ValueError:
+            pass
+
+    return upgrade_state
+
+
+def _find_containers_with_upgrade_status(
+    client: DockerClient, status: str
+) -> list[Container]:
+    """Find containers with a specific upgrade status."""
+    try:
+        containers = client.containers.list(
+            all=True, filters={"label": f"guerite.upgrade.status={status}"}
+        )
+        return containers
+    except DockerException as error:
+        LOG.error("Failed to find containers with upgrade status %s: %s", status, error)
+        return []
+
+
+def _recover_stalled_upgrades(
+    client: DockerClient, settings: Settings, event_log: list[str], notify: bool
+) -> None:
+    """Recover from stalled upgrades by checking tracked upgrade state."""
+    if not _UPGRADE_STATE:
+        return
+
+    now = now_utc()
+    stall_threshold = getattr(settings, "upgrade_stall_timeout_seconds", 1800)
+
+    stalled_containers = []
+    for container_id, upgrade_state in _UPGRADE_STATE.items():
+        if upgrade_state.status != "in-progress":
+            continue
+        if not upgrade_state.started_at:
+            continue
+
+        age_seconds = (now - upgrade_state.started_at).total_seconds()
+        if age_seconds > stall_threshold:
+            stalled_containers.append((container_id, upgrade_state, age_seconds))
+
+    for container_id, upgrade_state, age_seconds in stalled_containers:
+        try:
+            container = client.containers.get(container_id)
+            base_name = _strip_guerite_suffix(container.name or "unknown")
+
+            LOG.warning(
+                "Detected stalled upgrade for %s (in-progress for %.0fs)",
+                base_name,
+                age_seconds,
+            )
+
+            if notify:
+                event_log.append(
+                    f"Detected stalled upgrade for {base_name}; marking as failed"
+                )
+
+            # Mark as failed
+            upgrade_state.status = "failed"
+            _track_upgrade_state(container_id, upgrade_state, state_file=getattr(settings, "state_file", None))
+
+            # Log for manual intervention
+            LOG.error(
+                "Upgrade stalled for %s - manual intervention may be required. "
+                "Original image: %s, Target image: %s",
+                base_name,
+                upgrade_state.original_image_id,
+                upgrade_state.target_image_id,
+            )
+
+        except Exception as error:
+            LOG.warning(
+                "Failed to check stalled upgrade container %s: %s",
+                _short_id(container_id),
+                error,
+            )
+            # If container cannot be inspected, clear state to avoid repeat noise
+            _clear_tracked_upgrade_state(container_id)
+
+
+def _check_for_manual_intervention(
+    client: DockerClient, settings: Settings, event_log: list[str], notify: bool
+) -> None:
+    """Notify about failed upgrades that may require manual intervention.
+
+    To avoid repeated notifications, track notified containers in _UPGRADE_STATE_NOTIFIED.
+    """
+    if not _UPGRADE_STATE:
+        return
+
+    for container_id, upgrade_state in _UPGRADE_STATE.items():
+        if upgrade_state.status != "failed":
+            continue
+        if container_id in _UPGRADE_STATE_NOTIFIED:
+            continue
+
+        base_name = _short_id(container_id)
+        try:
+            container = client.containers.get(container_id)
+            base_name = _strip_guerite_suffix(container.name or base_name)
+        except DockerException:
+            # If container is gone, we still notify once and then clear state
+            pass
+
+        message = (
+            f"Upgrade failed for {base_name}; manual intervention may be required. "
+            f"Original: {upgrade_state.original_image_id or 'unknown'}, "
+            f"Target: {upgrade_state.target_image_id or 'unknown'}"
+        )
+        LOG.warning(message)
+        if notify:
+            event_log.append(message)
+
+        _UPGRADE_STATE_NOTIFIED.add(container_id)
+        # Clear state for non-existent containers to reduce noise
+        try:
+            client.containers.get(container_id)
+        except DockerException:
+            _clear_tracked_upgrade_state(container_id)
 
 
 def _rollback_container_recreation(
@@ -822,9 +1283,15 @@ def _build_create_kwargs(
     container: Container, image_ref: str, temp_name: str, client: DockerClient
 ) -> dict:
     """Build container creation kwargs from existing container."""
-    config = container.attrs.get("Config", {})
-    host_config = container.attrs.get("HostConfig")
-    networking = container.attrs.get("NetworkSettings", {}).get("Networks")
+    attrs = getattr(container, "attrs", {}) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    config = attrs.get("Config", {}) if isinstance(attrs, dict) else {}
+    host_config = attrs.get("HostConfig") if isinstance(attrs, dict) else None
+    networking = None
+    if isinstance(attrs, dict):
+        networking = attrs.get("NetworkSettings", {})
+        networking = networking.get("Networks") if isinstance(networking, dict) else None
 
     # Build network endpoint config
     endpoint_map = {}
@@ -900,6 +1367,7 @@ def restart_container(
     settings: Settings,
     event_log: list[str],
     notify: bool,
+    is_upgrade: bool = False,
 ) -> bool:
     """Enhanced container recreation with comprehensive fallback."""
     state = ContainerRecreateState()
@@ -920,10 +1388,31 @@ def restart_container(
     state.temp_old_name = f"{base_name}-guerite-old-{short_suffix}"
     state.temp_new_name = f"{base_name}-guerite-new-{short_suffix}"
 
+    # Setup upgrade state tracking if this is an upgrade
+    upgrade_state = None
+    if is_upgrade and new_image_id:
+        old_image_id = current_image_id(container)
+        upgrade_state = UpgradeState(
+            original_image_id=old_image_id,
+            target_image_id=new_image_id,
+            started_at=now_utc(),
+            status="in-progress",
+        )
+        _track_upgrade_state(container.id, upgrade_state, state_file=settings.state_file)
+        LOG.info("Started upgrade tracking for %s", base_name)
+
     # Preflight checks
-    config = container.attrs.get("Config", {})
-    mounts = container.attrs.get("Mounts") or []
-    networking = container.attrs.get("NetworkSettings", {}).get("Networks")
+    attrs = getattr(container, "attrs", {}) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    config = attrs.get("Config", {}) if isinstance(attrs, dict) else {}
+    mounts = attrs.get("Mounts") or []
+    if not isinstance(mounts, list):
+        mounts = []
+    networking = None
+    if isinstance(attrs, dict):
+        net = attrs.get("NetworkSettings", {})
+        networking = net.get("Networks") if isinstance(net, dict) else None
 
     _preflight_mounts(name, mounts, notify, event_log)
 
@@ -1036,9 +1525,15 @@ def restart_container(
             _RESTART_FAIL_COUNT.pop(container.id, None)
             _RESTART_BACKOFF.pop(container.id, None)
 
+        # Step 10: Complete upgrade tracking if this was an upgrade
+        if is_upgrade and upgrade_state and container.id:
+            upgrade_state.status = "completed"
+            _track_upgrade_state(container.id, upgrade_state, state_file=settings.state_file)
+            LOG.info("Upgrade completed successfully for %s", state.original_name)
+
         return True
 
-    except (APIError, DockerException, RuntimeError, TypeError) as error:
+    except (APIError, DockerException, RuntimeError, TypeError, Exception) as error:
         LOG.error(
             "Failed to restart %s during recreate: %s", state.original_name, error
         )
@@ -1075,6 +1570,12 @@ def restart_container(
             _register_restart_failure(
                 container.id, state.original_name, notify, event_log, settings, error
             )
+
+        # Mark upgrade as failed if this was an upgrade
+        if is_upgrade and upgrade_state and container.id:
+            upgrade_state.status = "failed"
+            _track_upgrade_state(container.id, upgrade_state, state_file=settings.state_file)
+            LOG.error("Upgrade failed for %s: %s", state.original_name, error)
 
         return False
 
@@ -1139,7 +1640,10 @@ def prune_images(
         had_timeout_attr = hasattr(client.api, "timeout")
         previous_timeout: Any = getattr(client.api, "timeout", None)
 
-        if settings.prune_timeout_seconds is not None and settings.prune_timeout_seconds > 0:
+        if (
+            settings.prune_timeout_seconds is not None
+            and settings.prune_timeout_seconds > 0
+        ):
             client.api.timeout = settings.prune_timeout_seconds
         elif isinstance(previous_timeout, (int, float)) and previous_timeout > 0:
             client.api.timeout = previous_timeout * 3
@@ -1194,6 +1698,13 @@ def prune_images(
         LOG.warning("Image prune timed out or connection failed: %s", error)
         if notify:
             event_log.append(f"Image prune timed out: {error}")
+    except Exception as error:
+        if ReadTimeoutError is not None and isinstance(error, ReadTimeoutError):
+            LOG.warning("Image prune timed out: %s", error)
+            if notify:
+                event_log.append(f"Image prune timed out: {error}")
+        else:
+            raise
 
 
 def _flush_detect_notifications(
@@ -1225,7 +1736,24 @@ def run_once(
     containers: Optional[list[Container]] = None,
 ) -> None:
     _ensure_health_backoff_loaded(settings.state_file)
+    _ensure_upgrade_state_loaded(settings.state_file)
+    _ensure_known_containers_loaded(settings.state_file)
     current_time = timestamp or now_utc()
+
+    # Check for stalled upgrades first
+    try:
+        _recover_stalled_upgrades(client, settings, [], _should_notify(settings, "restart"))
+    except Exception as error:
+        LOG.warning("Upgrade recovery failed: %s", error)
+
+    # Check for upgrades that may need manual intervention
+    try:
+        _check_for_manual_intervention(
+            client, settings, [], _should_notify(settings, "restart")
+        )
+    except Exception as error:
+        LOG.warning("Manual intervention check failed: %s", error)
+
     prune_due = _prune_due(settings, current_time)
     monitored = (
         containers
@@ -1321,23 +1849,37 @@ def run_once(
                     event_log.append(f"Found new {image_ref} image")
                 if settings.dry_run:
                     LOG.info("Dry-run enabled; not restarting %s", container.name)
-                elif restart_container(
-                    client,
-                    container,
-                    image_ref,
-                    pulled_image.id,
-                    settings,
-                    event_log,
-                    notify_update,
-                ):
-                    remove_old_image(
-                        client,
-                        old_image_id,
-                        pulled_image.id,
-                        event_log,
-                        notify_update,
-                    )
-                    update_executed = True
+                else:
+                    if _supports_is_upgrade(restart_container):
+                        ok = restart_container(
+                            client,
+                            container,
+                            image_ref,
+                            pulled_image.id,
+                            settings,
+                            event_log,
+                            notify_update,
+                            is_upgrade=True,
+                        )
+                    else:
+                        ok = restart_container(
+                            client,
+                            container,
+                            image_ref,
+                            pulled_image.id,
+                            settings,
+                            event_log,
+                            notify_update,
+                        )
+                    if ok:
+                        remove_old_image(
+                            client,
+                            old_image_id,
+                            pulled_image.id,
+                            event_log,
+                            notify_update,
+                        )
+                        update_executed = True
             elif pulled_image is not None:
                 LOG.debug("%s is up-to-date", container.name)
             elif notify_update:
@@ -1345,49 +1887,49 @@ def run_once(
             if update_executed:
                 continue
 
-            if recreate_due and not unhealthy_now:
-                if not _restart_allowed(
-                    container.id, base_name, current_time, settings
+        if recreate_due and not unhealthy_now and not update_executed:
+            if not _restart_allowed(
+                container.id, base_name, current_time, settings
+            ):
+                if (
+                    _should_notify(settings, "restart")
+                    or _should_notify(settings, "recreate")
+                    or _should_notify(settings, "update")
+                    or _should_notify(settings, "health")
                 ):
-                    if (
-                        _should_notify(settings, "restart")
-                        or _should_notify(settings, "recreate")
-                        or _should_notify(settings, "update")
-                        or _should_notify(settings, "health")
-                    ):
-                        backoff_until = _RESTART_BACKOFF.get(container.id)
-                        if backoff_until is not None:
-                            _notify_restart_backoff(
-                                container.name,
-                                container.id,
-                                backoff_until,
-                                event_log,
-                                settings,
-                            )
-                    continue
-
-                LOG.info("Recreating %s (scheduled recreate)", container.name)
-                _mark_action(base_name, current_time)
-                if settings.dry_run:
-                    LOG.info("Dry-run enabled; not recreating %s", container.name)
-                    continue
-                notify_recreate = _should_notify(settings, "recreate")
-                image_id = current_image_id(container)
-                if notify_recreate:
-                    event_log.append(
-                        f"Recreating {container.name} (scheduled recreate) ({_image_display_name(image_ref=image_ref)})"
-                    )
-                if restart_container(
-                    client,
-                    container,
-                    image_ref,
-                    image_id,
-                    settings,
-                    event_log,
-                    notify_recreate,
-                ):
-                    pass
+                    backoff_until = _RESTART_BACKOFF.get(container.id)
+                    if backoff_until is not None:
+                        _notify_restart_backoff(
+                            container.name,
+                            container.id,
+                            backoff_until,
+                            event_log,
+                            settings,
+                        )
                 continue
+
+            LOG.info("Recreating %s (scheduled recreate)", container.name)
+            _mark_action(base_name, current_time)
+            if settings.dry_run:
+                LOG.info("Dry-run enabled; not recreating %s", container.name)
+                continue
+            notify_recreate = _should_notify(settings, "recreate")
+            image_id = current_image_id(container)
+            if notify_recreate:
+                event_log.append(
+                    f"Recreating {container.name} (scheduled recreate) ({_image_display_name(image_ref=image_ref)})"
+                )
+            if restart_container(
+                client,
+                container,
+                image_ref,
+                image_id,
+                settings,
+                event_log,
+                notify_recreate,
+            ):
+                pass
+            continue
 
         if unhealthy_now and not _health_allowed(
             container.id, base_name, current_time, settings
@@ -1485,6 +2027,10 @@ def run_once(
         notify_webhook(settings, title, body)
     _flush_detect_notifications(settings, hostname, current_time)
     _IN_FLIGHT.clear()
+
+    # Save state at the end of each run for crash recovery
+    _save_upgrade_state(settings.state_file)
+    _save_known_containers(settings.state_file)
 
 
 def next_wakeup(

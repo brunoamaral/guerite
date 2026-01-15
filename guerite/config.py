@@ -10,7 +10,7 @@ DEFAULT_HEALTH_BACKOFF_SECONDS = 300
 DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS = 60
 DEFAULT_NOTIFICATIONS = "update"
 DEFAULT_DOCKER_HOST = "unix://var/run/docker.sock"
-DEFAULT_PUSHOOVER_API = "https://api.pushover.net/1/messages.json"
+DEFAULT_PUSHOVER_API = "https://api.pushover.net/1/messages.json"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TZ = "UTC"
 DEFAULT_STATE_FILE = "/tmp/guerite_state.json"
@@ -21,6 +21,10 @@ DEFAULT_ROLLBACK_GRACE_SECONDS = 3600
 DEFAULT_RESTART_RETRY_LIMIT = 3
 DEFAULT_DEPENDS_LABEL = "guerite.depends_on"
 DEFAULT_ACTION_COOLDOWN_SECONDS = 60
+DEFAULT_UPGRADE_STALL_TIMEOUT_SECONDS = 1800
+DEFAULT_DOCKER_CONNECT_RETRIES = 5
+DEFAULT_DOCKER_CONNECT_BACKOFF_SECONDS = 5
+DEFAULT_NOTIFICATION_TIMEOUT_SECONDS = 30
 
 
 ALL_NOTIFICATION_EVENTS: Set[str] = {
@@ -37,28 +41,31 @@ ALL_NOTIFICATION_EVENTS: Set[str] = {
 
 @dataclass(frozen=True)
 class Settings:
-    docker_host: str
-    update_label: str
-    restart_label: str
-    recreate_label: str
-    health_label: str
-    health_backoff_seconds: int
-    health_check_timeout_seconds: int
-    prune_timeout_seconds: Optional[int]
-    notifications: Set[str]
-    timezone: str
-    pushover_token: Optional[str]
-    pushover_user: Optional[str]
-    pushover_api: str
-    webhook_url: Optional[str]
-    dry_run: bool
-    log_level: str
-    state_file: str
-    prune_cron: Optional[str]
-    rollback_grace_seconds: int
-    restart_retry_limit: int
-    depends_label: str
-    action_cooldown_seconds: int
+    docker_host: str = DEFAULT_DOCKER_HOST
+    update_label: str = DEFAULT_UPDATE_LABEL
+    restart_label: str = DEFAULT_RESTART_LABEL
+    recreate_label: str = DEFAULT_RECREATE_LABEL
+    health_label: str = DEFAULT_HEALTH_LABEL
+    health_backoff_seconds: int = DEFAULT_HEALTH_BACKOFF_SECONDS
+    health_check_timeout_seconds: int = DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS
+    prune_timeout_seconds: Optional[int] = DEFAULT_PRUNE_TIMEOUT_SECONDS
+    notifications: Set[str] = frozenset({DEFAULT_NOTIFICATIONS})
+    timezone: str = DEFAULT_TZ
+    pushover_token: Optional[str] = None
+    pushover_user: Optional[str] = None
+    pushover_api: str = DEFAULT_PUSHOVER_API
+    webhook_url: Optional[str] = DEFAULT_WEBHOOK_URL
+    dry_run: bool = False
+    log_level: str = DEFAULT_LOG_LEVEL
+    state_file: str = DEFAULT_STATE_FILE
+    prune_cron: Optional[str] = DEFAULT_PRUNE_CRON
+    rollback_grace_seconds: int = DEFAULT_ROLLBACK_GRACE_SECONDS
+    restart_retry_limit: int = DEFAULT_RESTART_RETRY_LIMIT
+    depends_label: str = DEFAULT_DEPENDS_LABEL
+    action_cooldown_seconds: int = DEFAULT_ACTION_COOLDOWN_SECONDS
+    upgrade_stall_timeout_seconds: int = DEFAULT_UPGRADE_STALL_TIMEOUT_SECONDS
+    docker_connect_retries: int = DEFAULT_DOCKER_CONNECT_RETRIES
+    docker_connect_backoff_seconds: int = DEFAULT_DOCKER_CONNECT_BACKOFF_SECONDS
 
 
 def load_settings() -> Settings:
@@ -84,7 +91,7 @@ def load_settings() -> Settings:
         timezone=getenv("GUERITE_TZ", DEFAULT_TZ),
         pushover_token=getenv("GUERITE_PUSHOVER_TOKEN"),
         pushover_user=getenv("GUERITE_PUSHOVER_USER"),
-        pushover_api=getenv("GUERITE_PUSHOVER_API", DEFAULT_PUSHOOVER_API),
+        pushover_api=getenv("GUERITE_PUSHOVER_API", DEFAULT_PUSHOVER_API),
         webhook_url=_env_str("GUERITE_WEBHOOK_URL", DEFAULT_WEBHOOK_URL),
         dry_run=_env_bool("GUERITE_DRY_RUN", False),
         log_level=getenv("GUERITE_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
@@ -102,6 +109,17 @@ def load_settings() -> Settings:
         action_cooldown_seconds=_env_int(
             "GUERITE_ACTION_COOLDOWN_SECONDS",
             DEFAULT_ACTION_COOLDOWN_SECONDS,
+        ),
+        upgrade_stall_timeout_seconds=_env_int(
+            "GUERITE_UPGRADE_STALL_TIMEOUT_SECONDS",
+            DEFAULT_UPGRADE_STALL_TIMEOUT_SECONDS,
+        ),
+        docker_connect_retries=_env_int(
+            "GUERITE_DOCKER_CONNECT_RETRIES", DEFAULT_DOCKER_CONNECT_RETRIES
+        ),
+        docker_connect_backoff_seconds=_env_int(
+            "GUERITE_DOCKER_CONNECT_BACKOFF_SECONDS",
+            DEFAULT_DOCKER_CONNECT_BACKOFF_SECONDS,
         ),
     )
 

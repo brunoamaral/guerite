@@ -60,6 +60,25 @@ def build_client(settings: Settings) -> DockerClient:
         raise SystemExit(f"Unable to connect to Docker: {error}") from error
 
 
+def build_client_with_retry(settings: Settings) -> DockerClient:
+    retries = max(0, settings.docker_connect_retries)
+    backoff = max(1, settings.docker_connect_backoff_seconds)
+    attempt = 0
+    last_error: Optional[Exception] = None
+    while attempt <= retries:
+        try:
+            return DockerClient(base_url=settings.docker_host)
+        except DockerException as error:
+            last_error = error
+            if attempt == retries:
+                break
+            delay = backoff * (attempt + 1)
+            LOG.warning("Unable to connect to Docker (attempt %s/%s): %s; retrying in %ss", attempt + 1, retries + 1, error, delay)
+            sleep(delay)
+            attempt += 1
+    raise SystemExit(f"Unable to connect to Docker after {retries+1} attempts: {last_error}") from last_error
+
+
 def is_monitored_event(event: dict, settings: Settings) -> bool:
     if event.get("Type") != "container":
         return False
@@ -120,7 +139,7 @@ def start_event_listener(client: DockerClient, settings: Settings, wake_signal: 
 def main() -> None:
     settings = load_settings()
     configure_logging(settings.log_level)
-    client = build_client(settings)
+    client = build_client_with_retry(settings)
     LOG.info("Starting Guerite")
     wake_signal = Event()
     start_event_listener(client, settings, wake_signal)
